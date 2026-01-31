@@ -9,13 +9,15 @@ import logging
 import ssl
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 import aiohttp
 import certifi
 from blinkpy.blinkpy import Blink
 from blinkpy.auth import Auth, BlinkTwoFARequiredError
 
+import base64
+from typing import Any
 logger = logging.getLogger(__name__)
 
 
@@ -164,6 +166,201 @@ class BlinkService:
             del self._pending_auth[user_id]
         logger.info("Blink disconnected for user %s", user_id)
         return {"success": True, "message": "Disconnected from Blink"}
+
+    async def capture_camera_frame(self, user_id: str, camera_name: str | None = None) -> dict:
+        """
+        Capture a single still image from a Blink camera.
+
+        Returns:
+          {
+            "success": True,
+            "camera_id": "...",
+            "camera_name": "...",
+            "captured_at": "...",
+            "image_bytes_b64": "..."
+          }
+        """
+        session = self._sessions.get(user_id)
+        if not session or not session.verified:
+            return {"success": False, "error": "Not connected to Blink"}
+
+        try:
+            await session.blink.refresh()
+
+            if not session.blink.cameras:
+                return {"success": False, "error": "No cameras found"}
+
+            # Choose camera
+            cam = None
+            if camera_name:
+                cam = session.blink.cameras.get(camera_name)
+                if cam is None:
+                    return {"success": False, "error": f"Camera '{camera_name}' not found"}
+            else:
+                # Default: first camera in dict
+                cam = next(iter(session.blink.cameras.values()))
+
+            # Request a fresh snapshot if supported
+            snap_fn = getattr(cam, "snap_picture", None)
+            if callable(snap_fn):
+                res = snap_fn()
+                if hasattr(res, "__await__"):
+                    await res
+
+            # Refresh to load the new image
+            await session.blink.refresh()
+
+            # Try to extract image bytes (defensive across blinkpy versions)
+            img_bytes: bytes | None = None
+
+            # Some versions expose "image" or "image_data"
+            for attr in ("image", "image_data", "thumbnail", "thumbnail_data"):
+                val = getattr(cam, attr, None)
+                if isinstance(val, (bytes, bytearray)) and len(val) > 0:
+                    img_bytes = bytes(val)
+                    break
+
+            # Some versions have helpers
+            if img_bytes is None:
+                get_img = getattr(cam, "get_image", None)
+                if callable(get_img):
+                    res = get_img()
+                    if hasattr(res, "__await__"):
+                        res = await res
+                    if isinstance(res, (bytes, bytearray)) and len(res) > 0:
+                        img_bytes = bytes(res)
+
+            if img_bytes is None:
+                return {
+                    "success": False,
+                    "error": "Unable to fetch camera image bytes (blinkpy API mismatch). "
+                             "Check camera object for image accessors."
+                }
+
+            return {
+                "success": True,
+                "camera_id": getattr(cam, "camera_id", None),
+                "camera_name": getattr(cam, "name", camera_name) or camera_name or "default",
+                "captured_at": datetime.utcnow().isoformat() + "Z",
+                "image_bytes_b64": base64.b64encode(img_bytes).decode("utf-8"),
+            }
+
+        except Exception as e:
+            logger.error("Error capturing camera frame for user %s: %s", user_id, e)
+            return {"success": False, "error": str(e)}
+
+
+    def get_connected_user_ids(self) -> list[str]:
+        """Return all user IDs that currently have a verified Blink session."""
+        return [
+            user_id
+            for user_id, session in self._sessions.items()
+            if session.verified
+        ]
+
+    async def get_recent_motion_events(
+        self, user_id: str, camera_name: str | None = None
+    ) -> list[dict]:
+        """
+        Get recent motion events for the specified Blink user (and optional camera).
+
+        Returns normalized event payloads. Defensive across blinkpy versions.
+        """
+        session = self._sessions.get(user_id)
+        if not session or not session.verified:
+            return []
+
+        try:
+            await session.blink.refresh()
+        except Exception as e:
+            logger.error("Failed to refresh Blink for motion events (user=%s): %s", user_id, e)
+            return []
+
+        cameras = []
+        if camera_name:
+            cam = session.blink.cameras.get(camera_name)
+            if cam:
+                cameras.append((camera_name, cam))
+        else:
+            cameras.extend(session.blink.cameras.items())
+
+        events: list[dict] = []
+        for name, cam in cameras:
+            if not cam:
+                continue
+
+            timestamp = self._extract_motion_timestamp(cam)
+            if not timestamp:
+                continue
+
+            camera_id = getattr(cam, "camera_id", None) or name
+            events.append({
+                "camera_id": camera_id,
+                "camera_name": name,
+                "timestamp": self._format_timestamp(timestamp),
+                "type": "motion",
+            })
+
+        return events
+
+    def _extract_motion_timestamp(self, camera: Any) -> Optional[datetime]:
+        candidates = []
+        motion_events = getattr(camera, "motion_events", None)
+        if isinstance(motion_events, list) and motion_events:
+            candidates.append(motion_events[0])
+
+        attrs = [
+            "last_motion",
+            "last_motion_time",
+            "last_event_time",
+            "last_recording",
+            "last_recording_time",
+            "last_image_fetch",
+        ]
+
+        for attr in attrs:
+            candidates.append(getattr(camera, attr, None))
+
+        for raw in candidates:
+            parsed = self._parse_motion_datetime(raw)
+            if parsed:
+                return parsed
+
+        return None
+
+    def _parse_motion_datetime(self, raw: Any) -> Optional[datetime]:
+        if isinstance(raw, datetime):
+            return raw
+
+        if isinstance(raw, dict):
+            for key in ("timestamp", "time", "date"):
+                parsed = self._parse_motion_datetime(raw.get(key))
+                if parsed:
+                    return parsed
+            return None
+
+        if isinstance(raw, str):
+            value = raw.strip()
+            if not value:
+                return None
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                    try:
+                        return datetime.strptime(value, fmt)
+                    except ValueError:
+                        continue
+        return None
+
+    def _format_timestamp(self, timestamp: Optional[datetime]) -> str:
+        ts = timestamp or datetime.utcnow()
+        if ts.tzinfo:
+            ts = ts.astimezone()
+        return ts.replace(microsecond=0).isoformat() + "Z"
+
 
 
 # Singleton instance

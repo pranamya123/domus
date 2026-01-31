@@ -33,6 +33,7 @@ from ..core.auth import (
 )
 from ..storage.redis_store import RedisDomusStorage
 from ..services.blink_service import get_blink_service
+from ..services.fridge_inventory_service import FridgeInventoryService
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -152,6 +153,11 @@ class BlinkVerifyResponse(BaseModel):
     success: bool
     message: str
     capabilities: CapabilitiesPayload
+
+
+class FridgeRefreshRequest(BaseModel):
+    """Fridge inventory refresh request."""
+    camera_name: Optional[str] = None
 
 
 # ============================================================================
@@ -369,6 +375,43 @@ async def blink_verify_2fa(
         message="Blink camera connected successfully",
         capabilities=session.capabilities
     )
+
+
+# ============================================================================
+# Fridge Inventory (Iteration 1)
+# ============================================================================
+
+@router.post("/fridge/refresh", tags=["fridge"])
+async def refresh_fridge_inventory(
+    request: FridgeRefreshRequest,
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage),
+):
+    """Capture a fridge snapshot and refresh inventory."""
+    service = FridgeInventoryService(storage)
+    result = await service.refresh(session.user_id, camera_name=request.camera_name)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.get("error", "Unable to refresh inventory"),
+        )
+    return result
+
+
+@router.get("/fridge/inventory", tags=["fridge"])
+async def get_fridge_inventory(
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage),
+):
+    """Get latest stored fridge inventory."""
+    service = FridgeInventoryService(storage)
+    inventory = await service.get_latest(session.user_id)
+    if not inventory:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No inventory snapshot found",
+        )
+    return inventory
 
 
 # ============================================================================

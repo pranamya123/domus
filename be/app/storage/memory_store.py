@@ -15,6 +15,7 @@ from shared.schemas.state import (
     WorkflowCheckpoint,
     BlinkConnectionWorkflow,
     InventorySnapshot,
+    FridgeMotionState,
     ActivityEntry,
     NotificationRecord,
     ApprovalRecord,
@@ -36,6 +37,7 @@ class MemoryStateStore(StateStore):
         self._blink_workflows: dict[str, BlinkConnectionWorkflow] = {}
         self._inventory: dict[str, InventorySnapshot] = {}
         self._inventory_history: dict[str, list] = {}
+        self._motion_state: dict[str, dict[str, FridgeMotionState]] = {}
         self._activities: dict[str, ActivityEntry] = {}
         self._user_activities: dict[str, list] = {}
         self._notifications: dict[str, NotificationRecord] = {}
@@ -110,6 +112,13 @@ class MemoryStateStore(StateStore):
 
     async def get_inventory_history(self, user_id: str, limit: int = 10) -> list[InventorySnapshot]:
         return self._inventory_history.get(user_id, [])[:limit]
+
+    async def save_motion_state(self, motion_state: FridgeMotionState) -> None:
+        user_states = self._motion_state.setdefault(motion_state.user_id, {})
+        user_states[motion_state.camera_id] = motion_state
+
+    async def get_motion_state(self, user_id: str, camera_id: str) -> Optional[FridgeMotionState]:
+        return self._motion_state.get(user_id, {}).get(camera_id)
 
     async def add_activity(self, activity: ActivityEntry) -> None:
         self._activities[str(activity.activity_id)] = activity

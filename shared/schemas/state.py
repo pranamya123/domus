@@ -163,6 +163,16 @@ class InventorySnapshot(BaseModel):
         return [item.name for item in self.items]
 
 
+class FridgeMotionState(BaseModel):
+    """Track last motion/cooldown info for a fridge camera."""
+
+    user_id: str
+    camera_id: str
+    camera_name: Optional[str] = None
+    last_motion_at: Optional[datetime] = None
+    cooldown_until: Optional[datetime] = None
+
+
 # ============================================================================
 # Activity / Audit Log
 # ============================================================================

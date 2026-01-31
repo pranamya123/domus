@@ -136,20 +136,19 @@ class FridgeAgent(BaseAgent):
             if not context.inventory:
                 self.status = AgentStatus.COMPLETED
                 return AgentResponse(
-                    content="""I don't have access to your fridge yet! To see what's in your fridge, you'll need to connect your Blink camera first.
+                content="""I don't have a fridge snapshot yet. Please connect Fridge Sense (Blink) via the left-side menu before we can scan your fridge.
 
-**To get started:**
-1. Go to Settings → Connect Devices
-2. Select "Blink Camera"
-3. Follow the setup instructions
+**How to connect:**
+1. Open the left menu in the Domus app
+2. Choose "Connect Devices"
+3. Select "Blink Camera" (Fridge Sense)
+4. Follow the setup prompts
 
-Once connected, I'll be able to scan your fridge and help you with:
+Once connected, I can keep your inventory updated and help you with:
 • Inventory tracking
 • Expiration alerts
 • Meal suggestions
-• Shopping lists
-
-Would you like me to guide you through the Blink setup?""",
+• Shopping lists""",
                     agent_type=self.agent_type,
                     status=AgentStatus.COMPLETED,
                     metadata={"requires_blink": True}

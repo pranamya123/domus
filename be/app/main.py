@@ -6,6 +6,7 @@ Main entry point for the Domus backend API.
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 from uuid import UUID
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, status
@@ -19,6 +20,7 @@ from shared.schemas.events import (
 from .core.config import settings
 from .core.auth import decode_token
 from .storage.memory_store import MemoryDomusStorage
+from .services.blink_motion_watcher import BlinkMotionWatcher
 from .api.routes import router, set_storage
 from .api.websocket import WebSocketManager, ws_manager
 
@@ -32,12 +34,13 @@ logger = logging.getLogger(__name__)
 # Global storage and websocket manager
 storage: MemoryDomusStorage = None
 websocket_manager: WebSocketManager = None
+motion_watcher: Optional[BlinkMotionWatcher] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global storage, websocket_manager
+    global storage, websocket_manager, motion_watcher
 
     # Startup
     logger.info("Starting Domus backend...")
@@ -52,6 +55,9 @@ async def lifespan(app: FastAPI):
 
     # Initialize WebSocket manager
     websocket_manager = WebSocketManager(storage)
+    # Start Blink motion watcher for fridge cameras
+    motion_watcher = BlinkMotionWatcher(storage)
+    await motion_watcher.start()
 
     logger.info("Domus backend started")
 
@@ -59,6 +65,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down Domus backend...")
+    if motion_watcher:
+        await motion_watcher.stop()
     await storage.close()
     logger.info("Domus backend stopped")
 

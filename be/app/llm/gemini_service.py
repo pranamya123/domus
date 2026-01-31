@@ -163,6 +163,21 @@ class GeminiService:
             logger.error(f"Gemini streaming error: {e}")
             yield "I apologize, but I encountered an error. Please try again."
 
+    async def extract_fridge_inventory(self, image_b64: str) -> list[dict]:
+        """
+        Extract a structured inventory list from a fridge image.
+
+        Iteration 1: stubbed response (no multimodal wiring yet).
+        """
+        if not image_b64:
+            return []
+
+        if self._mock_mode:
+            return [{"name": "milk", "quantity": 1, "unit": "carton"}]
+
+        logger.info("Gemini inventory extraction stub called (multimodal not wired)")
+        return [{"name": "milk", "quantity": 1, "unit": "carton"}]
+
     def _build_prompt(
         self,
         prompt: str,

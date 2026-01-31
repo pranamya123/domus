@@ -29,6 +29,8 @@ from ..core.config import settings
 from ..storage.redis_store import RedisDomusStorage
 from ..agents import get_orchestrator
 from ..agents.base import AgentType as AgentTypeEnum, AgentStatus as AgentStatusEnum
+from ..services.fridge_inventory_service import FridgeInventoryService
+from ..services.blink_service import get_blink_service
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +188,34 @@ class WebSocketManager:
                 pass  # Continue without history if unavailable
 
             # Get inventory (only if Blink connected)
-            inventory = self._get_mock_inventory(blink_connected)
+            inventory = None
+            service = FridgeInventoryService(self._storage)
+            is_inventory_query = self._is_inventory_query(content)
+            blink_service = get_blink_service()
+            blink_service_connected = blink_service.is_connected(user_id)
+            logger.info(
+                "Fridge query context (user_id=%s, blink_connected_flag=%s, blink_service_connected=%s, is_inventory_query=%s)",
+                user_id,
+                blink_connected,
+                blink_service_connected,
+                is_inventory_query,
+            )
+            if is_inventory_query:
+                inventory = await service.get_latest(user_id)
+                if inventory is None:
+                    refresh = await service.refresh(user_id)
+                    if not refresh.get("success"):
+                        logger.warning(
+                            "Fridge refresh failed (user_id=%s, error=%s)",
+                            user_id,
+                            refresh.get("error"),
+                        )
+                    if refresh.get("success"):
+                        inventory = await service.get_latest(user_id)
+            elif blink_connected:
+                inventory = await service.get_latest(user_id)
+            if blink_connected and inventory is None:
+                inventory = {"items": []}
 
             # Process message through orchestrator
             response, agent_type = await orchestrator.process_message(
@@ -251,27 +280,21 @@ class WebSocketManager:
         }
         return mapping.get(agent_type, AgentType.FRIDGE)
 
-    def _get_mock_inventory(self, blink_connected: bool = False) -> dict | None:
-        """Get inventory data - returns None if Blink not connected"""
-        if not blink_connected:
-            return None  # No inventory without Blink connection
-
-        # Mock inventory for when Blink IS connected (for testing)
-        return {
-            "items": [
-                {"name": "Apples", "quantity": 4, "unit": "pieces", "estimated_expiry": "5 days"},
-                {"name": "Spinach", "quantity": 1, "unit": "bag", "estimated_expiry": "2 days"},
-                {"name": "Carrots", "quantity": 1, "unit": "bunch", "estimated_expiry": "1 week"},
-                {"name": "Bell peppers", "quantity": 2, "unit": "pieces", "estimated_expiry": "4 days"},
-                {"name": "Milk", "quantity": 1, "unit": "gallon", "estimated_expiry": "5 days"},
-                {"name": "Greek yogurt", "quantity": 2, "unit": "cups", "estimated_expiry": "1 week"},
-                {"name": "Cheddar cheese", "quantity": 1, "unit": "block", "estimated_expiry": "2 weeks"},
-                {"name": "Chicken breast", "quantity": 2, "unit": "lbs", "estimated_expiry": "3 days"},
-                {"name": "Eggs", "quantity": 8, "unit": "pieces", "estimated_expiry": "2 weeks"},
-                {"name": "Leftover pasta", "quantity": 1, "unit": "container", "estimated_expiry": "today"},
-                {"name": "Orange juice", "quantity": 0.5, "unit": "gallon", "estimated_expiry": "1 week"},
-            ]
-        }
+    def _is_inventory_query(self, message: str) -> bool:
+        """Check if a message is asking about fridge inventory."""
+        msg = message.lower()
+        keywords = [
+            "fridge",
+            "refrigerator",
+            "firdge",
+            "what's in my fridge",
+            "whats in my fridge",
+            "what do i have",
+            "inventory",
+            "scan my fridge",
+            "scan my firdge",
+        ]
+        return any(k in msg for k in keywords)
 
     async def _heartbeat_loop(self, user_id: str) -> None:
         """Send periodic heartbeat to keep connection alive."""

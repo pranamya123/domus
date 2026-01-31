@@ -22,6 +22,7 @@ from shared.schemas.state import (
     InventorySnapshot,
     ActivityEntry,
     NotificationRecord,
+    FridgeMotionState,
     ApprovalRecord,
     DomusState,
 )
@@ -63,6 +64,9 @@ class RedisKeys:
     NOTIFICATION = "notification:{notification_id}"
     USER_NOTIFICATIONS = "user:{user_id}:notifications"
     IDEMPOTENCY = "idempotency:{key}"
+
+    # Motion state (fridge cameras)
+    MOTION_STATE = "motion:{user_id}:{camera_id}"
 
     # Approvals
     APPROVAL = "approval:{approval_id}"
@@ -241,6 +245,20 @@ class RedisStateStore(StateStore):
         key = RedisKeys.INVENTORY_HISTORY.format(user_id=user_id)
         items = await self._client.lrange(key, 0, limit - 1)
         return [_deserialize(item, InventorySnapshot) for item in items]
+
+    async def save_motion_state(self, motion_state: FridgeMotionState) -> None:
+        """Save motion/cooldown info for a fridge camera."""
+        key = RedisKeys.MOTION_STATE.format(
+            user_id=motion_state.user_id,
+            camera_id=motion_state.camera_id
+        )
+        await self._client.set(key, _serialize(motion_state))
+
+    async def get_motion_state(self, user_id: str, camera_id: str) -> Optional[FridgeMotionState]:
+        """Get stored motion/cooldown info."""
+        key = RedisKeys.MOTION_STATE.format(user_id=user_id, camera_id=camera_id)
+        data = await self._client.get(key)
+        return _deserialize(data, FridgeMotionState) if data else None
 
     # ---- Activity Log ----
 

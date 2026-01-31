@@ -18,6 +18,7 @@ from .state import (
     InventorySnapshot,
     ActivityEntry,
     NotificationRecord,
+    FridgeMotionState,
     ApprovalRecord,
     DomusState,
 )
@@ -129,6 +130,18 @@ class StateStore(ABC):
         self, user_id: str, limit: int = 10
     ) -> list[InventorySnapshot]:
         """Get inventory history for temporal analysis."""
+        pass
+
+    @abstractmethod
+    async def save_motion_state(self, motion_state: FridgeMotionState) -> None:
+        """Save last motion/cooldown info for a fridge camera."""
+        pass
+
+    @abstractmethod
+    async def get_motion_state(
+        self, user_id: str, camera_id: str
+    ) -> Optional[FridgeMotionState]:
+        """Retrieve motion/cooldown info for a specific fridge camera."""
         pass
 
     # ---- Activity Log ----
