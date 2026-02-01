@@ -187,35 +187,45 @@ class WebSocketManager:
             except Exception:
                 pass  # Continue without history if unavailable
 
-            # Get inventory (only if Blink connected)
+            # TODO: Re-enable Blink-based inventory refresh once Blink auth is fixed
+            # For now, FridgeAgent reads thumbnail directly from storage/media/
+            # and uses Gemini vision to analyze the image
             inventory = None
-            service = FridgeInventoryService(self._storage)
             is_inventory_query = self._is_inventory_query(content)
-            blink_service = get_blink_service()
-            blink_service_connected = blink_service.is_connected(user_id)
             logger.info(
-                "Fridge query context (user_id=%s, blink_connected_flag=%s, blink_service_connected=%s, is_inventory_query=%s)",
+                "Fridge query context (user_id=%s, is_inventory_query=%s) - using direct thumbnail read",
                 user_id,
-                blink_connected,
-                blink_service_connected,
                 is_inventory_query,
             )
-            if is_inventory_query:
-                inventory = await service.get_latest(user_id)
-                if inventory is None:
-                    refresh = await service.refresh(user_id)
-                    if not refresh.get("success"):
-                        logger.warning(
-                            "Fridge refresh failed (user_id=%s, error=%s)",
-                            user_id,
-                            refresh.get("error"),
-                        )
-                    if refresh.get("success"):
-                        inventory = await service.get_latest(user_id)
-            elif blink_connected:
-                inventory = await service.get_latest(user_id)
-            if blink_connected and inventory is None:
-                inventory = {"items": []}
+            # Skip Blink service calls - FridgeAgent will handle thumbnail directly
+            # service = FridgeInventoryService(self._storage)
+            # blink_service = get_blink_service()
+            # blink_service_connected = blink_service.is_connected(user_id)
+
+            # Create status callback for multi-agent coordination
+            async def status_callback(
+                agent_type: AgentTypeEnum,
+                status: AgentStatusEnum,
+                message: str
+            ) -> None:
+                """Callback to emit agent status updates during coordination."""
+                event_agent = self._map_agent_type(agent_type)
+                # Map internal status to event schema status
+                status_mapping = {
+                    AgentStatusEnum.ACTIVATING: AgentStatus.ACTIVATING,
+                    AgentStatusEnum.ACTIVE: AgentStatus.ACTIVATED,
+                    AgentStatusEnum.PROCESSING: AgentStatus.PROCESSING,
+                    AgentStatusEnum.COMPLETED: AgentStatus.COMPLETED,
+                    AgentStatusEnum.ERROR: AgentStatus.ERROR,
+                    AgentStatusEnum.IDLE: AgentStatus.DEACTIVATED,
+                }
+                event_status = status_mapping.get(status, AgentStatus.ACTIVATING)
+                status_event = create_agent_status_event(
+                    agent=event_agent,
+                    status=event_status,
+                    message=message
+                )
+                await self.broadcast_to_user(user_id, status_event)
 
             # Process message through orchestrator
             response, agent_type = await orchestrator.process_message(
@@ -223,7 +233,8 @@ class WebSocketManager:
                 user_id=user_id,
                 session_id=session.session_id,
                 chat_history=chat_history,
-                inventory=inventory
+                inventory=inventory,
+                status_callback=status_callback
             )
 
             # 3. Emit activated status
@@ -268,13 +279,15 @@ class WebSocketManager:
             await self.broadcast_to_user(user_id, response_event)
 
     def _map_agent_type(self, agent_type: Optional[AgentTypeEnum]) -> AgentType:
-        """Map internal agent type to event schema agent type"""
+        """Map internal agent type to event schema agent type."""
         if agent_type is None:
             return AgentType.FRIDGE  # Default
 
         mapping = {
+            AgentTypeEnum.ORCHESTRATOR: AgentType.ORCHESTRATOR,
             AgentTypeEnum.FRIDGE: AgentType.FRIDGE,
             AgentTypeEnum.CALENDAR: AgentType.CALENDAR,
+            AgentTypeEnum.INSTACART: AgentType.INSTACART,
             AgentTypeEnum.SERVICES: AgentType.SERVICES,
             AgentTypeEnum.NOTIFICATION: AgentType.NOTIFICATION,
         }

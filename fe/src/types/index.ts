@@ -18,6 +18,7 @@ export enum EventType {
   APPROVAL_REQUEST = "approval.request",
   APPROVAL_RESULT = "approval.result",
   NOTIFICATION_SENT = "notification.sent",
+  NOTIFICATION_CREATED = "notification.created",  // New proactive notification
   CHAT_USER_MESSAGE = "chat.user_message",
   CHAT_ASSISTANT_MESSAGE = "chat.assistant_message",
   HEARTBEAT = "system.heartbeat",
@@ -147,6 +148,30 @@ export interface ChatMessage {
   sender: "user" | "domus";
   timestamp: string;
   status?: "sending" | "sent" | "error";
+  fromNotification?: boolean;  // True if this message originated from a notification
+}
+
+// ============================================================================
+// Notification Types
+// ============================================================================
+
+export interface Notification {
+  notification_id: string;
+  title: string;
+  body: string;
+  sent_at: string;
+  read_at: string | null;
+  notification_type: "chat" | "proactive";
+  chat_seed_content: string | null;
+  event_id: string | null;
+}
+
+export interface NotificationCreatedPayload {
+  notification_id: string;
+  title: string;
+  body: string;
+  notification_type: "chat" | "proactive";
+  event_id?: string;
 }
 
 // ============================================================================
@@ -171,4 +196,8 @@ export function isErrorEvent(event: DomusEvent): event is DomusEvent & { payload
 
 export function isCapabilitiesEvent(event: DomusEvent): event is DomusEvent & { payload: CapabilitiesPayload } {
   return event.type === EventType.CAPABILITIES_UPDATED;
+}
+
+export function isNotificationCreatedEvent(event: DomusEvent): event is DomusEvent & { payload: NotificationCreatedPayload } {
+  return event.type === EventType.NOTIFICATION_CREATED;
 }

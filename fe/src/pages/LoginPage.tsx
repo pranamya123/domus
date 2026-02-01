@@ -11,6 +11,7 @@ export function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const isLoading = useStore((state) => state.isLoading);
   const setScreen = useStore((state) => state.setScreen);
   const { login } = useApi();
@@ -19,16 +20,28 @@ export function LoginPage() {
     e.preventDefault();
     setError('');
 
+    // Prevent double submission
+    if (isSubmitting || isLoading) {
+      console.log('[Login] Ignoring submit - already in progress');
+      return;
+    }
+
     if (!email) {
       setError('Please enter your email');
       return;
     }
 
+    setIsSubmitting(true);
+    console.log('[Login] Starting login for:', email);
+
     try {
       await login(email);
+      console.log('[Login] Login successful, navigating to chat');
       setScreen(ScreenType.CHAT);
     } catch (err) {
+      console.error('[Login] Login failed:', err);
       setError(err instanceof Error ? err.message : 'Login failed');
+      setIsSubmitting(false);
     }
   };
 

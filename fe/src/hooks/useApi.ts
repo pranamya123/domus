@@ -4,7 +4,7 @@
 
 import { useCallback } from 'react';
 import { useStore } from '../store/useStore';
-import { LoginResponse, User, CapabilitiesPayload } from '../types';
+import { LoginResponse, User, CapabilitiesPayload, Notification } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : 'http://localhost:8000/api';
 
@@ -29,6 +29,17 @@ interface MediaStatus {
   video: { available: boolean; size_bytes: number; modified_at: string } | null;
 }
 
+interface NotificationsListResponse {
+  notifications: Notification[];
+  unread_count: number;
+}
+
+interface NotificationResolveResponse {
+  notification_id: string;
+  chat_seed_content: string;
+  marked_read: boolean;
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {},
@@ -50,7 +61,9 @@ async function fetchApi<T>(
 
   if (!response.ok) {
     const error: ApiError = await response.json().catch(() => ({ detail: 'Unknown error' }));
-    throw new Error(error.detail || `HTTP ${response.status}`);
+    // Include status code in error message for proper error handling
+    const statusPrefix = response.status === 401 ? '401 Unauthorized: ' : `HTTP ${response.status}: `;
+    throw new Error(statusPrefix + (error.detail || 'Request failed'));
   }
 
   return response.json();
@@ -63,6 +76,9 @@ export function useApi() {
   const setCapabilities = useStore((state) => state.setCapabilities);
   const setLoading = useStore((state) => state.setLoading);
   const logout = useStore((state) => state.logout);
+  const setNotifications = useStore((state) => state.setNotifications);
+  const setUnreadCount = useStore((state) => state.setUnreadCount);
+  const markNotificationRead = useStore((state) => state.markNotificationRead);
 
   const login = useCallback(async (email: string): Promise<LoginResponse> => {
     setLoading(true);
@@ -163,6 +179,65 @@ export function useApi() {
     return `${API_BASE}/media/video`;
   }, []);
 
+  // Notification API methods
+  const fetchNotifications = useCallback(async (): Promise<NotificationsListResponse> => {
+    const response = await fetchApi<NotificationsListResponse>('/notifications', {}, token);
+    setNotifications(response.notifications);
+    setUnreadCount(response.unread_count);
+    return response;
+  }, [token, setNotifications, setUnreadCount]);
+
+  const fetchUnreadCount = useCallback(async (): Promise<number> => {
+    const response = await fetchApi<{ unread_count: number }>('/notifications/unread-count', {}, token);
+    setUnreadCount(response.unread_count);
+    return response.unread_count;
+  }, [token, setUnreadCount]);
+
+  const resolveNotificationToChat = useCallback(async (notificationId: string): Promise<NotificationResolveResponse> => {
+    const response = await fetchApi<NotificationResolveResponse>(
+      `/notifications/${notificationId}/resolve`,
+      { method: 'POST' },
+      token
+    );
+    markNotificationRead(notificationId);
+    return response;
+  }, [token, markNotificationRead]);
+
+  // Test endpoint to create a sample proactive notification
+  const createTestNotification = useCallback(async (): Promise<{ notification_id: string; title: string; body: string }> => {
+    const response = await fetchApi<{ notification_id: string; title: string; body: string }>(
+      '/notifications/test',
+      { method: 'POST' },
+      token
+    );
+    return response;
+  }, [token]);
+
+  // Push notification API methods
+  const registerDeviceToken = useCallback(async (deviceToken: string): Promise<{ message: string; configured: boolean }> => {
+    return fetchApi<{ message: string; configured: boolean }>(
+      '/push/device-token',
+      { method: 'POST', body: JSON.stringify({ token: deviceToken }) },
+      token
+    );
+  }, [token]);
+
+  const getPushStatus = useCallback(async (): Promise<{ configured: boolean; has_server_key: boolean; has_device_token: boolean }> => {
+    return fetchApi<{ configured: boolean; has_server_key: boolean; has_device_token: boolean }>(
+      '/push/status',
+      {},
+      token
+    );
+  }, [token]);
+
+  const sendTestPush = useCallback(async (): Promise<{ push_sent: boolean; push_error: string | null }> => {
+    return fetchApi<{ push_sent: boolean; push_error: string | null }>(
+      '/push/test',
+      { method: 'POST' },
+      token
+    );
+  }, [token]);
+
   return {
     login,
     logout: doLogout,
@@ -173,6 +248,13 @@ export function useApi() {
     getMediaStatus,
     getMediaThumbnailUrl,
     getMediaVideoUrl,
+    fetchNotifications,
+    fetchUnreadCount,
+    resolveNotificationToChat,
+    createTestNotification,
+    registerDeviceToken,
+    getPushStatus,
+    sendTestPush,
     token,
   };
 }

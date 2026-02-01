@@ -10,6 +10,7 @@ import {
   ChatMessage,
   User,
   CapabilitiesPayload,
+  Notification,
 } from '../types';
 
 interface AppState {
@@ -27,6 +28,11 @@ interface AppState {
 
   // Chat
   messages: ChatMessage[];
+
+  // Notifications
+  notifications: Notification[];
+  unreadCount: number;
+  notificationPanelOpen: boolean;
 
   // Capabilities
   capabilities: CapabilitiesPayload;
@@ -49,6 +55,13 @@ interface AppState {
   setConnected: (connected: boolean) => void;
   setLoading: (loading: boolean) => void;
   logout: () => void;
+
+  // Notification actions
+  setNotifications: (notifications: Notification[]) => void;
+  addNotification: (notification: Notification) => void;
+  setUnreadCount: (count: number) => void;
+  markNotificationRead: (notificationId: string) => void;
+  setNotificationPanelOpen: (open: boolean) => void;
 }
 
 const initialAgentStatus: Record<AgentType, AgentStatus> = {
@@ -76,6 +89,9 @@ export const useStore = create<AppState>((set) => ({
   agentStatus: initialAgentStatus,
   activeAgent: null,
   messages: [],
+  notifications: [],
+  unreadCount: 0,
+  notificationPanelOpen: false,
   capabilities: initialCapabilities,
   isConnected: false,
   isLoading: false,
@@ -129,8 +145,43 @@ export const useStore = create<AppState>((set) => ({
       agentStatus: initialAgentStatus,
       activeAgent: null,
       messages: [],
+      notifications: [],
+      unreadCount: 0,
+      notificationPanelOpen: false,
       capabilities: initialCapabilities,
       isConnected: false,
     });
   },
+
+  // Notification actions
+  setNotifications: (notifications) => {
+    const unreadCount = notifications.filter((n) => n.read_at === null).length;
+    set({ notifications, unreadCount });
+  },
+
+  addNotification: (notification) =>
+    set((state) => {
+      const exists = state.notifications.some(
+        (n) => n.notification_id === notification.notification_id
+      );
+      if (exists) return state;
+      return {
+        notifications: [notification, ...state.notifications],
+        unreadCount: notification.read_at === null ? state.unreadCount + 1 : state.unreadCount,
+      };
+    }),
+
+  setUnreadCount: (count) => set({ unreadCount: count }),
+
+  markNotificationRead: (notificationId) =>
+    set((state) => ({
+      notifications: state.notifications.map((n) =>
+        n.notification_id === notificationId
+          ? { ...n, read_at: new Date().toISOString() }
+          : n
+      ),
+      unreadCount: Math.max(0, state.unreadCount - 1),
+    })),
+
+  setNotificationPanelOpen: (open) => set({ notificationPanelOpen: open }),
 }));

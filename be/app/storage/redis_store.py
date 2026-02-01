@@ -335,6 +335,29 @@ class RedisStateStore(StateStore):
                 notifications.append(_deserialize(data, NotificationRecord))
         return notifications
 
+    async def get_notification(self, notification_id: UUID) -> Optional[NotificationRecord]:
+        """Get a single notification by ID."""
+        key = RedisKeys.NOTIFICATION.format(notification_id=notification_id)
+        data = await self._client.get(key)
+        return _deserialize(data, NotificationRecord) if data else None
+
+    async def mark_notification_read(self, notification_id: UUID) -> Optional[NotificationRecord]:
+        """Mark a notification as read. Returns updated notification."""
+        key = RedisKeys.NOTIFICATION.format(notification_id=notification_id)
+        data = await self._client.get(key)
+        if not data:
+            return None
+
+        notification = _deserialize(data, NotificationRecord)
+        notification.read_at = datetime.utcnow()
+        await self._client.set(key, _serialize(notification))
+        return notification
+
+    async def get_unread_count(self, user_id: str) -> int:
+        """Get count of unread notifications for a user."""
+        notifications = await self.get_notifications(user_id, limit=100)
+        return sum(1 for n in notifications if n.read_at is None)
+
     async def check_idempotency(self, key: str) -> bool:
         """Check if idempotency key exists (for cooldowns)."""
         idem_key = RedisKeys.IDEMPOTENCY.format(key=key)

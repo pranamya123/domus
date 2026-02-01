@@ -20,6 +20,7 @@ class AgentType(str, Enum):
     SECURITY = "DSecurity"
     SERVICES = "DServices"
     NOTIFICATION = "DNotification"
+    INSTACART = "DInstacart"
 
 
 class AgentStatus(str, Enum):

@@ -3,10 +3,13 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useApi } from '../hooks/useApi';
-import { AgentType, AgentStatus } from '../types';
+import { sendLocalNotification } from '../hooks/useCapacitor';
+import { AgentType, AgentStatus, Notification } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : 'http://localhost:8000/api';
 
@@ -32,6 +35,13 @@ function detectAgent(message: string): string | null {
 // Blink connection flow steps
 type BlinkStep = 'none' | 'connect' | 'login' | '2fa' | 'success';
 
+// Order card state
+interface OrderCard {
+  id: string;
+  items: string[];
+  status: 'pending' | 'approved' | 'ignored';
+}
+
 export function ChatPage() {
   const [inputValue, setInputValue] = useState('');
   const [activatingAgent, setActivatingAgent] = useState<string | null>(null);
@@ -44,6 +54,7 @@ export function ChatPage() {
   const [blinkLoading, setBlinkLoading] = useState(false);
   const [showMediaPreview, setShowMediaPreview] = useState(false);
   const [mediaTimestamp, setMediaTimestamp] = useState(Date.now());
+  const [orderCards, setOrderCards] = useState<OrderCard[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const user = useStore((state) => state.user);
@@ -51,9 +62,21 @@ export function ChatPage() {
   const agentStatus = useStore((state) => state.agentStatus);
   const addMessage = useStore((state) => state.addMessage);
   const capabilities = useStore((state) => state.capabilities);
+  const notifications = useStore((state) => state.notifications);
+  const unreadCount = useStore((state) => state.unreadCount);
+  const notificationPanelOpen = useStore((state) => state.notificationPanelOpen);
+  const setNotificationPanelOpen = useStore((state) => state.setNotificationPanelOpen);
+  const addNotification = useStore((state) => state.addNotification);
 
   const { isConnected, sendMessage } = useWebSocket();
-  const { blinkLogin, blinkVerify, token } = useApi();
+  const { blinkLogin, blinkVerify, token, fetchNotifications, resolveNotificationToChat, createTestNotification } = useApi();
+
+  // Fetch notifications on mount
+  useEffect(() => {
+    if (token) {
+      fetchNotifications().catch(console.error);
+    }
+  }, [token, fetchNotifications]);
 
   // Refresh media when Blink connects
   const refreshMedia = useCallback(() => {
@@ -180,6 +203,98 @@ export function ChatPage() {
     setBlink2FA('');
     setBlinkError('');
     setBlinkLoading(false);
+  };
+
+  // Handle notification click - resolve to chat and insert seeded message
+  const handleNotificationClick = async (notification: Notification) => {
+    try {
+      const result = await resolveNotificationToChat(notification.notification_id);
+
+      // Insert the chat seed content as an assistant message
+      addMessage({
+        id: `notif-${notification.notification_id}`,
+        content: result.chat_seed_content,
+        sender: 'domus',
+        timestamp: new Date().toISOString(),
+        fromNotification: true,
+      });
+
+      // For proactive notifications with missing items, show order card
+      if (notification.notification_type === 'proactive') {
+        // Extract items from notification body (e.g., "missing: flour, sugar, vanilla")
+        const bodyLower = notification.body.toLowerCase();
+        const missingMatch = bodyLower.match(/missing[:\s]+([^.]+)/);
+        if (missingMatch) {
+          const items = missingMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+          if (items.length > 0) {
+            setOrderCards(prev => [...prev, {
+              id: notification.notification_id,
+              items,
+              status: 'pending',
+            }]);
+          }
+        }
+      }
+
+      // Close the notification panel
+      setNotificationPanelOpen(false);
+    } catch (err) {
+      console.error('Failed to resolve notification:', err);
+    }
+  };
+
+  // Handle order card approve
+  const handleOrderApprove = (cardId: string) => {
+    setOrderCards(prev => prev.map(card =>
+      card.id === cardId ? { ...card, status: 'approved' as const } : card
+    ));
+    // Mock Instacart order
+    addMessage({
+      id: `order-${cardId}`,
+      content: 'Order placed with Instacart. Your items will arrive soon.',
+      sender: 'domus',
+      timestamp: new Date().toISOString(),
+    });
+    // Auto-remove after 3 seconds
+    setTimeout(() => {
+      setOrderCards(prev => prev.filter(card => card.id !== cardId));
+    }, 3000);
+  };
+
+  // Handle order card ignore
+  const handleOrderIgnore = (cardId: string) => {
+    setOrderCards(prev => prev.filter(card => card.id !== cardId));
+  };
+
+  // Handle scan button - open camera
+  const handleScanClick = async () => {
+    try {
+      if (!Capacitor.isNativePlatform()) {
+        console.log('[Camera] Not on native platform, camera unavailable');
+        return;
+      }
+
+      const image = await Camera.getPhoto({
+        quality: 80,
+        allowEditing: false,
+        resultType: CameraResultType.Base64,
+        source: CameraSource.Camera,
+      });
+
+      console.log('[Camera] Photo captured');
+      // TODO: Send image to backend for fridge analysis
+      // For now, just log that we got the image
+      if (image.base64String) {
+        addMessage({
+          id: `scan-${Date.now()}`,
+          content: 'Photo captured! Analyzing fridge contents...',
+          sender: 'domus',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      console.error('[Camera] Error:', err);
+    }
   };
 
   return (
@@ -395,18 +510,117 @@ export function ChatPage() {
               <path d="M12 6v6l4 2"/>
             </svg>
           </button>
-          {/* Bell icon */}
-          <button style={styles.iconButton}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-              <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-            </svg>
+          {/* Bell icon with badge */}
+          <button
+            style={styles.iconButton}
+            onClick={() => setNotificationPanelOpen(!notificationPanelOpen)}
+          >
+            <div style={{ position: 'relative' }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+              </svg>
+              {unreadCount > 0 && (
+                <span style={styles.notificationBadge}>
+                  {unreadCount > 9 ? '9+' : unreadCount}
+                </span>
+              )}
+            </div>
           </button>
         </div>
       </header>
 
+      {/* Notification Panel */}
+      {notificationPanelOpen && (
+        <>
+          <div
+            style={styles.notificationOverlay}
+            onClick={() => setNotificationPanelOpen(false)}
+          />
+          <div style={styles.notificationPanel}>
+            <div style={styles.notificationHeader}>
+              <span style={styles.notificationTitle}>Notifications</span>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                  style={styles.testNotificationBtn}
+                  onClick={async () => {
+                    console.log('[Test] Creating test notification...');
+                    try {
+                      const result = await createTestNotification();
+                      console.log('[Test] Created:', result);
+                      // Add directly to store with descriptive title for panel
+                      addNotification({
+                        notification_id: result.notification_id,
+                        title: result.title, // Keep descriptive title for panel
+                        body: result.body,
+                        sent_at: new Date().toISOString(),
+                        read_at: null,
+                        notification_type: 'proactive',
+                        chat_seed_content: `${result.title}\n\n${result.body}`,
+                        event_id: null,
+                      });
+                      console.log('[Test] Added to store');
+
+                      // Send local notification with "domus" title (per mockup)
+                      await sendLocalNotification(
+                        'domus',
+                        'Missing items for the Bake Sale tomorrow, order now',
+                        result.notification_id
+                      );
+                      console.log('[Test] Local notification sent');
+                    } catch (err) {
+                      console.error('[Test] Error:', err);
+                    }
+                  }}
+                >
+                  Test
+                </button>
+                <button
+                  style={styles.notificationCloseBtn}
+                  onClick={() => setNotificationPanelOpen(false)}
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <path d="M1 1L11 11M1 11L11 1" stroke="#000" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div style={styles.notificationList}>
+              {notifications.length === 0 ? (
+                <p style={styles.notificationEmpty}>No notifications</p>
+              ) : (
+                notifications.map((notification) => (
+                  <div
+                    key={notification.notification_id}
+                    style={{
+                      ...styles.notificationItem,
+                      backgroundColor: notification.read_at ? '#FFFFFF' : '#F0FFF0',
+                    }}
+                    onClick={() => handleNotificationClick(notification)}
+                  >
+                    <div style={styles.notificationItemHeader}>
+                      <span style={styles.notificationItemTitle}>{notification.title}</span>
+                      {notification.notification_type === 'proactive' && (
+                        <span style={styles.proactiveLabel}>Reminder</span>
+                      )}
+                    </div>
+                    <p style={styles.notificationItemBody}>{notification.body}</p>
+                    <span style={styles.notificationItemTime}>
+                      {new Date(notification.sent_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Main content */}
-      <div style={styles.mainContent}>
+      <div style={{
+        ...styles.mainContent,
+        justifyContent: messages.length === 0 ? 'center' : 'flex-end',
+      }}>
         {messages.length === 0 ? (
           <div style={styles.emptyState}>
             <h1 style={styles.emptyTitle}>Ready to manage{'\n'}your home?</h1>
@@ -427,6 +641,41 @@ export function ChatPage() {
             {activatingAgent && (
               <p style={styles.agentActivating}>Activating {activatingAgent} agent...</p>
             )}
+            {/* Order Cards */}
+            {orderCards.map((card) => (
+              <div key={card.id} style={styles.orderCard}>
+                {card.status === 'approved' ? (
+                  <div style={styles.orderCardApproved}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" fill="#077507"/>
+                      <path d="M8 12L11 15L16 9" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={styles.orderCardApprovedText}>Order placed</span>
+                  </div>
+                ) : (
+                  <>
+                    <p style={styles.orderCardText}>
+                      Missing: <strong>{card.items.join(', ')}</strong>
+                    </p>
+                    <p style={styles.orderCardPrompt}>Order from Instacart?</p>
+                    <div style={styles.orderCardButtons}>
+                      <button
+                        style={styles.orderCardIgnoreBtn}
+                        onClick={() => handleOrderIgnore(card.id)}
+                      >
+                        Ignore
+                      </button>
+                      <button
+                        style={styles.orderCardApproveBtn}
+                        onClick={() => handleOrderApprove(card.id)}
+                      >
+                        Approve
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
             <div ref={messagesEndRef} />
           </div>
         )}
@@ -442,7 +691,6 @@ export function ChatPage() {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={!isConnected}
             className="placeholder-style"
           />
           <button style={styles.sendButton} onClick={handleSend} disabled={!inputValue.trim() || isAgentActivating}>
@@ -453,8 +701,8 @@ export function ChatPage() {
           </button>
         </div>
         <div style={styles.bottomRow}>
-          {/* Scan icon */}
-          <button style={styles.scanButton}>
+          {/* Scan icon - opens camera */}
+          <button style={styles.scanButton} onClick={handleScanClick}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#A1A1A1" strokeWidth="2">
               <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
               <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
@@ -490,6 +738,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     top: 0,
     left: 0,
     overflow: 'hidden',
+    boxSizing: 'border-box',
   },
   overlay: {
     position: 'fixed',
@@ -694,7 +943,9 @@ const styles: { [key: string]: React.CSSProperties } = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '16px 20px',
+    padding: '8px 16px',
+    paddingTop: 'calc(env(safe-area-inset-top, 0px) + 8px)',
+    flexShrink: 0,
   },
   headerLeft: {
     display: 'flex',
@@ -733,11 +984,13 @@ const styles: { [key: string]: React.CSSProperties } = {
     flexDirection: 'column',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: '20px',
+    padding: '12px 16px',
     overflow: 'auto',
+    minHeight: 0,
   },
   emptyState: {
     textAlign: 'center',
+    marginBottom: '80px',
   },
   emptyTitle: {
     fontFamily: '"Prata", serif',
@@ -783,31 +1036,39 @@ const styles: { [key: string]: React.CSSProperties } = {
     alignSelf: 'flex-start',
   },
   bottomCard: {
-    width: '100%',
+    width: 'calc(100% - 32px)',
     maxWidth: '340px',
-    height: '110px',
-    backgroundColor: 'rgba(255, 255, 255, 0.5)',
+    minHeight: '100px',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
     borderRadius: '10px',
-    padding: '14px 16px',
-    margin: '0 auto 20px auto',
+    padding: '12px 16px',
+    margin: '0 auto',
+    marginBottom: 'calc(env(safe-area-inset-bottom, 0px) + 24px)',
     boxSizing: 'border-box',
     display: 'flex',
     flexDirection: 'column',
     justifyContent: 'space-between',
+    flexShrink: 0,
+    position: 'relative' as const,
+    zIndex: 10,
   },
   inputRow: {
     display: 'flex',
     alignItems: 'center',
     gap: '12px',
+    minHeight: '44px',
   },
   input: {
     flex: 1,
     border: 'none',
     outline: 'none',
     fontFamily: '"Roboto", sans-serif',
-    fontSize: '14px',
+    fontSize: '16px',
     color: '#000000',
     backgroundColor: 'transparent',
+    WebkitAppearance: 'none' as const,
+    padding: '8px 0',
+    minHeight: '24px',
   },
   sendButton: {
     background: 'none',
@@ -846,5 +1107,193 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '12px',
     fontWeight: 400,
     color: '#000000',
+  },
+  // Notification styles
+  notificationBadge: {
+    position: 'absolute' as const,
+    top: '-6px',
+    right: '-6px',
+    backgroundColor: '#D32F2F',
+    color: '#FFFFFF',
+    borderRadius: '10px',
+    padding: '1px 5px',
+    fontSize: '10px',
+    fontWeight: 600,
+    fontFamily: '"Roboto", sans-serif',
+    minWidth: '14px',
+    textAlign: 'center' as const,
+  },
+  notificationOverlay: {
+    position: 'fixed' as const,
+    top: 0,
+    left: 0,
+    width: '100vw',
+    height: '100vh',
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+    zIndex: 900,
+  },
+  notificationPanel: {
+    position: 'fixed' as const,
+    top: '60px',
+    right: '16px',
+    width: '320px',
+    maxHeight: '70vh',
+    backgroundColor: '#FFFFFF',
+    borderRadius: '10px',
+    boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
+    zIndex: 901,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    overflow: 'hidden',
+  },
+  notificationHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '16px',
+    borderBottom: '1px solid #E8E8E8',
+  },
+  notificationTitle: {
+    fontFamily: '"Prata", serif',
+    fontSize: '16px',
+    fontWeight: 400,
+    color: '#000000',
+  },
+  notificationCloseBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '4px',
+    display: 'flex',
+    alignItems: 'center',
+  },
+  notificationList: {
+    flex: 1,
+    overflowY: 'auto' as const,
+    padding: '8px',
+  },
+  notificationEmpty: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '14px',
+    color: '#A1A1A1',
+    textAlign: 'center' as const,
+    padding: '24px',
+  },
+  notificationItem: {
+    padding: '12px',
+    borderRadius: '8px',
+    marginBottom: '8px',
+    cursor: 'pointer',
+    transition: 'background-color 0.2s',
+    border: '1px solid #E8E8E8',
+  },
+  notificationItemHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '4px',
+  },
+  notificationItemTitle: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '14px',
+    fontWeight: 500,
+    color: '#000000',
+  },
+  proactiveLabel: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '10px',
+    fontWeight: 400,
+    color: '#077507',
+    backgroundColor: '#E8F5E9',
+    padding: '2px 6px',
+    borderRadius: '4px',
+  },
+  notificationItemBody: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '12px',
+    color: '#5E5D5D',
+    margin: '0 0 8px 0',
+    lineHeight: 1.4,
+  },
+  notificationItemTime: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '10px',
+    color: '#A1A1A1',
+  },
+  testNotificationBtn: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '11px',
+    fontWeight: 500,
+    color: '#077507',
+    backgroundColor: '#E8F5E9',
+    border: '1px solid #C7D4C7',
+    borderRadius: '4px',
+    padding: '4px 8px',
+    cursor: 'pointer',
+  },
+  // Order Card styles
+  orderCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: '12px',
+    padding: '16px',
+    marginTop: '12px',
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
+    border: '1px solid #E8F5E9',
+    width: '100%',
+    maxWidth: '300px',
+    alignSelf: 'flex-start',
+  },
+  orderCardText: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '14px',
+    color: '#333',
+    margin: '0 0 8px 0',
+  },
+  orderCardPrompt: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '13px',
+    color: '#666',
+    margin: '0 0 12px 0',
+  },
+  orderCardButtons: {
+    display: 'flex',
+    gap: '10px',
+  },
+  orderCardIgnoreBtn: {
+    flex: 1,
+    padding: '10px 16px',
+    backgroundColor: '#F5F5F5',
+    border: '1px solid #E0E0E0',
+    borderRadius: '8px',
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '13px',
+    fontWeight: 500,
+    color: '#666',
+    cursor: 'pointer',
+  },
+  orderCardApproveBtn: {
+    flex: 1,
+    padding: '10px 16px',
+    backgroundColor: '#077507',
+    border: 'none',
+    borderRadius: '8px',
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '13px',
+    fontWeight: 500,
+    color: '#FFFFFF',
+    cursor: 'pointer',
+  },
+  orderCardApproved: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    padding: '8px 0',
+  },
+  orderCardApprovedText: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '14px',
+    fontWeight: 500,
+    color: '#077507',
   },
 };

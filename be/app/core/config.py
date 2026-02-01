@@ -39,7 +39,8 @@ class Settings(BaseSettings):
 
     # Gemini LLM
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_vision_model: str = "gemini-2.5-flash-lite"  # Multimodal model for fridge analysis
 
     # CORS
     cors_origins: list[str] = [
@@ -47,8 +48,11 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
-    ]
+        "https://sane-highhanded-regenia.ngrok-free.dev",
 
+        "capacitor://localhost",
+        "ionic://localhost",
+    ]
 
 
 @lru_cache

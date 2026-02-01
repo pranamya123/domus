@@ -1,14 +1,35 @@
 """
 Fridge Agent - Manages refrigerator inventory and meal suggestions
+
+Uses Gemini multimodal vision to analyze fridge contents from thumbnail images.
+Maintains persistent chat sessions with image context for follow-up questions.
 """
 
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Any
+
+import google.generativeai as genai
 
 from .base import BaseAgent, AgentType, AgentStatus, AgentContext, AgentResponse
 from app.llm import GeminiService, get_gemini_service, SYSTEM_PROMPTS
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Media storage path for thumbnail
+MEDIA_DIR = Path(__file__).resolve().parent.parent / "storage" / "media"
+
+# Fridge-specific grounding for Gemini vision
+FRIDGE_IMAGE_SCOPE = (
+    "This image shows the items inside a refrigerator. "
+    "Answer all questions based only on the food visible inside the fridge. "
+    "IMPORTANT: Keep responses SHORT and CRISP. "
+    "When listing items, use a simple bullet list format. "
+    "No lengthy descriptions - just the essentials. "
+    "Focus on: food items, quantities, and freshness. "
+    "Ignore refrigerator hardware and non-food items."
+)
 
 
 # Keywords that indicate fridge-related queries
@@ -23,19 +44,38 @@ FRIDGE_KEYWORDS = [
 
 class FridgeAgent(BaseAgent):
     """
-    DFridge Agent - Intelligent refrigerator management.
+    Fridge Agent - Intelligent refrigerator management with vision.
 
     Capabilities:
+    - Analyze fridge contents using Gemini multimodal vision
     - Track food inventory with expiration dates
     - Suggest meals based on available ingredients
     - Create shopping lists
     - Reduce food waste
+
+    Uses Gemini Files API + Chat for persistent image reasoning.
     """
 
     def __init__(self, llm_service: Optional[GeminiService] = None):
         super().__init__(AgentType.FRIDGE)
         self.llm = llm_service or get_gemini_service()
         self._tools = self._define_tools()
+
+        # Gemini vision chat state
+        settings = get_settings()
+        self._api_key = settings.gemini_api_key
+        self._vision_model = getattr(settings, 'gemini_vision_model', 'gemini-3-pro-preview')
+        self._chat_sessions: dict[str, Any] = {}  # user_id -> chat session
+        self._uploaded_files: dict[str, Any] = {}  # user_id -> uploaded file
+        self._last_thumbnail_hash: dict[str, str] = {}  # user_id -> hash
+
+        # Configure Gemini if API key available
+        if self._api_key:
+            masked_key = self._api_key[:8] + "..." + self._api_key[-4:] if len(self._api_key) > 12 else "***"
+            logger.info("Gemini API key loaded: %s (model: %s)", masked_key, self._vision_model)
+            genai.configure(api_key=self._api_key)
+        else:
+            logger.warning("No Gemini API key found in settings - vision will be unavailable")
 
     def _define_tools(self) -> list[dict]:
         """Define the tools/functions this agent can use"""
@@ -114,6 +154,136 @@ class FridgeAgent(BaseAgent):
             }
         ]
 
+    # =========================================================================
+    # Gemini Vision Chat Methods
+    # =========================================================================
+
+    def _get_thumbnail_path(self) -> Path:
+        """Get path to the latest thumbnail image."""
+        return MEDIA_DIR / "latest_thumbnail.jpg"
+
+    def _compute_file_hash(self, file_path: Path) -> str:
+        """Compute MD5 hash of a file for change detection."""
+        import hashlib
+        if not file_path.exists():
+            return ""
+        with open(file_path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+
+    async def _ensure_vision_chat(self, user_id: str) -> bool:
+        """
+        Ensure a Gemini vision chat session exists for the user.
+
+        Reads the thumbnail from storage, uploads to Gemini Files API,
+        and creates a chat session with fridge-specific grounding.
+
+        Returns True if session is ready, False otherwise.
+        """
+        if not self._api_key:
+            logger.warning("No Gemini API key - vision chat unavailable")
+            return False
+
+        thumbnail_path = self._get_thumbnail_path()
+        if not thumbnail_path.exists():
+            logger.warning("No thumbnail available at %s", thumbnail_path)
+            return False
+
+        # Check if thumbnail has changed (need to refresh session)
+        current_hash = self._compute_file_hash(thumbnail_path)
+        if user_id in self._chat_sessions:
+            if self._last_thumbnail_hash.get(user_id) == current_hash:
+                # Session exists and thumbnail unchanged
+                return True
+            else:
+                # Thumbnail changed, close old session
+                logger.info("Thumbnail changed, refreshing vision chat for user %s", user_id)
+                await self._close_vision_chat(user_id)
+
+        try:
+            # Upload image using Files API
+            logger.info("Uploading fridge thumbnail for user %s", user_id)
+            uploaded_file = genai.upload_file(
+                path=str(thumbnail_path),
+                mime_type="image/jpeg"
+            )
+            self._uploaded_files[user_id] = uploaded_file
+            logger.info("Thumbnail uploaded: %s", uploaded_file.uri)
+
+            # Create model with vision config
+            model = genai.GenerativeModel(
+                model_name=self._vision_model,
+                generation_config={
+                    "temperature": 0.4,  # Lower temp for factual analysis
+                    "top_p": 0.95,
+                    "top_k": 40,
+                    "max_output_tokens": 2048,
+                }
+            )
+
+            # Start chat with image + fridge grounding
+            chat = model.start_chat(
+                history=[
+                    {
+                        "role": "user",
+                        "parts": [
+                            uploaded_file,
+                            FRIDGE_IMAGE_SCOPE
+                        ]
+                    },
+                    {
+                        "role": "model",
+                        "parts": [
+                            "Got it! I can see your fridge contents. "
+                            "I'll keep my responses short and to the point. "
+                            "What would you like to know?"
+                        ]
+                    }
+                ]
+            )
+
+            self._chat_sessions[user_id] = chat
+            self._last_thumbnail_hash[user_id] = current_hash
+            logger.info("Vision chat session created for user %s", user_id)
+            return True
+
+        except Exception as e:
+            logger.error("Failed to create vision chat session: %s", e)
+            return False
+
+    async def _ask_vision_chat(self, user_id: str, question: str) -> Optional[str]:
+        """
+        Ask a question to the Gemini vision chat.
+
+        Returns the response text, or None if chat unavailable.
+        """
+        chat = self._chat_sessions.get(user_id)
+        if not chat:
+            return None
+
+        try:
+            response = chat.send_message(question)
+            return response.text
+        except Exception as e:
+            logger.error("Vision chat error for user %s: %s", user_id, e)
+            return None
+
+    async def _close_vision_chat(self, user_id: str) -> None:
+        """Close and cleanup a user's vision chat session."""
+        if user_id in self._chat_sessions:
+            del self._chat_sessions[user_id]
+
+        if user_id in self._uploaded_files:
+            try:
+                genai.delete_file(self._uploaded_files[user_id].name)
+            except Exception as e:
+                logger.warning("Failed to delete uploaded file: %s", e)
+            del self._uploaded_files[user_id]
+
+        if user_id in self._last_thumbnail_hash:
+            del self._last_thumbnail_hash[user_id]
+
+        logger.info("Closed vision chat session for user %s", user_id)
+
     def can_handle(self, message: str) -> bool:
         """Check if message is fridge-related"""
         message_lower = message.lower()
@@ -121,7 +291,13 @@ class FridgeAgent(BaseAgent):
 
     async def process(self, context: AgentContext) -> AgentResponse:
         """
-        Process a fridge-related request.
+        Process a fridge-related request using Gemini multimodal vision.
+
+        Flow:
+        1. Check if thumbnail exists in storage
+        2. Initialize/refresh Gemini vision chat with thumbnail image
+        3. Forward user question to vision chat
+        4. Post-process and return response
 
         Args:
             context: Agent context with message and state
@@ -132,62 +308,57 @@ class FridgeAgent(BaseAgent):
         self.status = AgentStatus.PROCESSING
 
         try:
-            # Check if Blink/FridgeSense is connected (inventory available)
-            if not context.inventory:
+            # TODO: Re-enable Blink auth check once Blink integration is fixed
+            # For now, just check if thumbnail file exists in storage
+            thumbnail_path = self._get_thumbnail_path()
+            if not thumbnail_path.exists():
                 self.status = AgentStatus.COMPLETED
                 return AgentResponse(
-                content="""I don't have a fridge snapshot yet. Please connect Fridge Sense (Blink) via the left-side menu before we can scan your fridge.
+                    content="""No fridge image found. Please ensure latest_thumbnail.jpg exists in the storage/media folder.
 
-**How to connect:**
-1. Open the left menu in the Domus app
-2. Choose "Connect Devices"
-3. Select "Blink Camera" (Fridge Sense)
-4. Follow the setup prompts
+For development: Place a fridge image at:
+`be/app/storage/media/latest_thumbnail.jpg`
 
-Once connected, I can keep your inventory updated and help you with:
-• Inventory tracking
+Once available, I can analyze your fridge contents and help you with:
+• See what's in your fridge
+• Meal suggestions based on ingredients
 • Expiration alerts
-• Meal suggestions
-• Shopping lists""",
+• Food safety checks
+• Dietary pattern analysis""",
                     agent_type=self.agent_type,
                     status=AgentStatus.COMPLETED,
-                    metadata={"requires_blink": True}
+                    metadata={"requires_thumbnail": True}
                 )
 
-            # Build context for LLM
-            system_prompt = SYSTEM_PROMPTS.get("fridge", "")
+            # Initialize or refresh vision chat with thumbnail
+            vision_ready = await self._ensure_vision_chat(context.user_id)
 
-            # Add inventory context
-            inventory_context = f"\n\nCurrent Fridge Inventory:\n{self._format_inventory(context.inventory)}"
-            full_system_prompt = system_prompt + inventory_context
+            if vision_ready:
+                # Use Gemini vision chat for image-aware response
+                logger.info("Using Gemini vision chat for user %s", context.user_id)
+                vision_response = await self._ask_vision_chat(
+                    context.user_id,
+                    context.message
+                )
 
-            # Generate response using LLM
-            response = await self.llm.generate(
-                prompt=context.message,
-                system_prompt=full_system_prompt,
-                chat_history=context.chat_history,
-                tools=self._tools
-            )
+                if vision_response:
+                    self.status = AgentStatus.COMPLETED
+                    return AgentResponse(
+                        content=vision_response,
+                        agent_type=self.agent_type,
+                        status=self.status,
+                        metadata={
+                            "model": self._vision_model,
+                            "vision_enabled": True,
+                            "finish_reason": "stop"
+                        }
+                    )
+                else:
+                    logger.warning("Vision chat returned no response, falling back to text LLM")
 
-            # Handle tool calls if any
-            tool_results = []
-            if response.tool_calls:
-                for tool_call in response.tool_calls:
-                    result = await self._execute_tool(tool_call, context)
-                    tool_results.append(result)
-
-            self.status = AgentStatus.COMPLETED
-
-            return AgentResponse(
-                content=response.content,
-                agent_type=self.agent_type,
-                status=self.status,
-                tool_results=tool_results,
-                metadata={
-                    "model": "gemini",
-                    "finish_reason": response.finish_reason
-                }
-            )
+            # Fallback to text-based LLM if vision unavailable
+            logger.info("Using text LLM fallback for user %s", context.user_id)
+            return await self._process_with_text_llm(context)
 
         except Exception as e:
             logger.error(f"Fridge agent error: {e}")
@@ -198,6 +369,51 @@ Once connected, I can keep your inventory updated and help you with:
                 status=AgentStatus.ERROR,
                 metadata={"error": str(e)}
             )
+
+    async def _process_with_text_llm(self, context: AgentContext) -> AgentResponse:
+        """
+        Fallback processing using text-only LLM with inventory context.
+
+        Used when vision chat is unavailable or fails.
+        """
+        # Build context for LLM
+        system_prompt = SYSTEM_PROMPTS.get("fridge", "")
+
+        # Add inventory context if available
+        if context.inventory:
+            inventory_context = f"\n\nCurrent Fridge Inventory:\n{self._format_inventory(context.inventory)}"
+            full_system_prompt = system_prompt + inventory_context
+        else:
+            full_system_prompt = system_prompt
+
+        # Generate response using LLM
+        response = await self.llm.generate(
+            prompt=context.message,
+            system_prompt=full_system_prompt,
+            chat_history=context.chat_history,
+            tools=self._tools
+        )
+
+        # Handle tool calls if any
+        tool_results = []
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                result = await self._execute_tool(tool_call, context)
+                tool_results.append(result)
+
+        self.status = AgentStatus.COMPLETED
+
+        return AgentResponse(
+            content=response.content,
+            agent_type=self.agent_type,
+            status=self.status,
+            tool_results=tool_results,
+            metadata={
+                "model": "gemini",
+                "vision_enabled": False,
+                "finish_reason": response.finish_reason
+            }
+        )
 
     def _format_inventory(self, inventory: dict) -> str:
         """Format inventory data for LLM context"""

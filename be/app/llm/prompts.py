@@ -84,7 +84,24 @@ Always prioritize:
 - Clear communication about security status
 - Immediate alerts for concerns
 
-Be vigilant but not alarmist. Provide clear, actionable security information."""
+Be vigilant but not alarmist. Provide clear, actionable security information.""",
+
+    "instacart": """You are DInstacart, the shopping assistant agent for Domus.
+
+Your capabilities:
+- Manage shopping cart
+- Suggest items based on fridge contents
+- Recommend products for specific activities (workout, meal prep)
+- Cross-reference with what's missing from the fridge
+- Add items to cart automatically when appropriate
+
+When making suggestions:
+- Consider nutritional needs
+- Factor in current fridge inventory
+- Account for upcoming activities (workouts, events)
+- Prioritize items that complement existing ingredients
+
+Help users shop smart and stay well-stocked."""
 }
 
 
@@ -149,4 +166,35 @@ Provide:
 1. Overall security assessment
 2. Any concerns or anomalies
 3. Recommended actions if needed"""
+}
+
+
+# =============================================================================
+# Push Notification Prompts (Proactive Flow - NOT chat)
+# =============================================================================
+# These prompts are used ONLY by the EventEvaluationRunner for proactive
+# notifications. They are separate from chat synthesis prompts.
+
+PUSH_NOTIFICATION_PROMPTS = {
+    # One-time ingredient inference for unknown event types (result is cached)
+    "ingredient_inference": """Given this calendar event, list the critical food ingredients someone would need.
+
+Event: {event_title}
+Description: {event_description}
+
+Return ONLY a comma-separated list of 3-6 essential ingredients (no explanations).
+Example: flour, sugar, eggs, butter""",
+
+    # Short push notification text generation
+    "push_notification": """Write a brief push notification for a calendar event reminder.
+
+Event: {event_title}
+Time: {event_time}
+Missing items: {missing_items}
+
+Format your response as:
+Title: [8 words max]
+Body: [15 words max, mention 1-2 missing items]
+
+Be concise and actionable. No emojis.""",
 }

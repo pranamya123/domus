@@ -150,6 +150,22 @@ class MemoryStateStore(StateStore):
         nids = self._user_notifications.get(user_id, [])[:limit]
         return [self._notifications[nid] for nid in nids if nid in self._notifications]
 
+    async def get_notification(self, notification_id: UUID) -> Optional[NotificationRecord]:
+        """Get a single notification by ID."""
+        return self._notifications.get(str(notification_id))
+
+    async def mark_notification_read(self, notification_id: UUID) -> Optional[NotificationRecord]:
+        """Mark a notification as read. Returns updated notification."""
+        notification = self._notifications.get(str(notification_id))
+        if notification:
+            notification.read_at = datetime.utcnow()
+        return notification
+
+    async def get_unread_count(self, user_id: str) -> int:
+        """Get count of unread notifications for a user."""
+        notifications = await self.get_notifications(user_id, limit=100)
+        return sum(1 for n in notifications if n.read_at is None)
+
     async def check_idempotency(self, key: str) -> bool:
         exp = self._idempotency.get(key)
         if exp and exp > datetime.utcnow():

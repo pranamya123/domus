@@ -33,6 +33,7 @@ class EventType(str, Enum):
 
     # Notifications
     NOTIFICATION_SENT = "notification.sent"
+    NOTIFICATION_CREATED = "notification.created"  # New proactive notification for bell UI
 
     # Chat messages
     CHAT_USER_MESSAGE = "chat.user_message"
@@ -50,14 +51,18 @@ class AgentStatus(str, Enum):
     """Agent activation states."""
     ACTIVATING = "activating"
     ACTIVATED = "activated"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
     DEACTIVATED = "deactivated"
     ERROR = "error"
 
 
 class AgentType(str, Enum):
     """Available agent types."""
+    ORCHESTRATOR = "orchestrator"
     FRIDGE = "fridge"
     CALENDAR = "calendar"
+    INSTACART = "instacart"
     SERVICES = "services"
     IDENTITY = "identity"
     NOTIFICATION = "notification"

@@ -11,19 +11,30 @@ import { ScreenType } from '../types';
 
 export function SplashScreen() {
   const setScreen = useStore((state) => state.setScreen);
+  const currentScreen = useStore((state) => state.currentScreen);
   const isAuthenticated = useStore((state) => state.isAuthenticated);
 
   useEffect(() => {
+    // Only run timer if we're actually on the splash screen
+    if (currentScreen !== ScreenType.SPLASH) {
+      console.log('[Splash] Not on splash screen, skipping timer');
+      return;
+    }
+
+    console.log('[Splash] Starting timer, isAuthenticated:', isAuthenticated);
+
     const timer = setTimeout(() => {
-      if (isAuthenticated) {
-        setScreen(ScreenType.CHAT);
-      } else {
-        setScreen(ScreenType.LOGIN);
-      }
+      // Double-check we should still navigate
+      const targetScreen = isAuthenticated ? ScreenType.CHAT : ScreenType.LOGIN;
+      console.log('[Splash] Timer fired, navigating to:', targetScreen);
+      setScreen(targetScreen);
     }, 4000); // <-- CHANGE THIS VALUE FOR DURATION (milliseconds)
 
-    return () => clearTimeout(timer);
-  }, [setScreen, isAuthenticated]);
+    return () => {
+      console.log('[Splash] Cleaning up timer');
+      clearTimeout(timer);
+    };
+  }, [setScreen, isAuthenticated, currentScreen]);
 
   return (
     <div style={styles.container}>

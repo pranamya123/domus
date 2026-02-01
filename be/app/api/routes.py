@@ -26,6 +26,7 @@ from shared.schemas.state import (
     UserProfile,
     DomusState,
     BlinkConnectionWorkflow,
+    NotificationRecord,
 )
 
 from ..core.auth import (
@@ -635,4 +636,295 @@ async def get_current_user(
         "picture": profile.picture_url if profile else None,
         "session_expires": session.expires_at.isoformat(),
         "capabilities": session.capabilities.model_dump()
+    }
+
+
+# ============================================================================
+# Notifications API
+# ============================================================================
+
+class NotificationResponse(BaseModel):
+    """Single notification in response."""
+    notification_id: str
+    title: str
+    body: str
+    sent_at: datetime
+    read_at: Optional[datetime] = None
+    notification_type: str = "chat"  # "chat" | "proactive"
+    chat_seed_content: Optional[str] = None
+    event_id: Optional[str] = None
+
+
+class NotificationsListResponse(BaseModel):
+    """List of notifications with unread count."""
+    notifications: list[NotificationResponse]
+    unread_count: int
+
+
+class NotificationResolveResponse(BaseModel):
+    """Response when resolving notification to chat."""
+    notification_id: str
+    chat_seed_content: str
+    marked_read: bool
+
+
+@router.get("/notifications", response_model=NotificationsListResponse, tags=["notifications"])
+async def get_notifications(
+    limit: int = Query(default=50, le=100),
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """
+    Get all notifications for the current user.
+
+    Returns notifications sorted by sent_at (newest first) with unread count.
+    Used to populate the notifications bell panel.
+    """
+    notifications = await storage.state.get_notifications(session.user_id, limit=limit)
+    unread_count = await storage.state.get_unread_count(session.user_id)
+    logger.info("GET /notifications user_id=%s count=%d unread=%d", session.user_id, len(notifications), unread_count)
+
+    return NotificationsListResponse(
+        notifications=[
+            NotificationResponse(
+                notification_id=str(n.notification_id),
+                title=n.title,
+                body=n.body,
+                sent_at=n.sent_at,
+                read_at=n.read_at,
+                notification_type=n.notification_type,
+                chat_seed_content=n.chat_seed_content,
+                event_id=n.event_id,
+            )
+            for n in notifications
+        ],
+        unread_count=unread_count
+    )
+
+
+@router.get("/notifications/unread-count", tags=["notifications"])
+async def get_unread_count(
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """Get just the unread notification count (for badge updates)."""
+    count = await storage.state.get_unread_count(session.user_id)
+    return {"unread_count": count}
+
+
+@router.post("/notifications/{notification_id}/resolve", response_model=NotificationResolveResponse, tags=["notifications"])
+async def resolve_notification_to_chat(
+    notification_id: str,
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """
+    Resolve a notification to chat.
+
+    When user clicks a notification:
+    1. Fetch the notification
+    2. Return the chat_seed_content (pre-seeded assistant message)
+    3. Mark notification as read
+
+    The frontend should insert chat_seed_content as the latest assistant message
+    and continue the conversation normally.
+    """
+    notification = await storage.state.get_notification(UUID(notification_id))
+
+    if not notification:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found"
+        )
+
+    if notification.user_id != session.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+
+    # Mark as read
+    updated = await storage.state.mark_notification_read(UUID(notification_id))
+
+    # Return chat seed content (use body if no explicit seed)
+    chat_content = notification.chat_seed_content or f"{notification.title}\n\n{notification.body}"
+
+    return NotificationResolveResponse(
+        notification_id=notification_id,
+        chat_seed_content=chat_content,
+        marked_read=updated.read_at is not None if updated else False
+    )
+
+
+@router.post("/notifications/test", tags=["notifications"])
+async def create_test_notification(
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """
+    Create a test proactive notification for development/testing.
+
+    This simulates what the EventEvaluationRunner would create when it
+    detects a calendar event with missing ingredients.
+    """
+    from uuid import uuid4
+
+    notification_id = uuid4()
+    title = "Prep reminder: School Bake Sale"
+    body = "You may be missing: flour, sugar, vanilla. Check your fridge before tomorrow!"
+    chat_seed_content = f"{title}\n\n{body}"
+
+    notification = NotificationRecord(
+        notification_id=notification_id,
+        user_id=session.user_id,
+        title=title,
+        body=body,
+        notification_type="proactive",
+        chat_seed_content=chat_seed_content,
+        event_id="test_event_001",
+        idempotency_key=f"test_{uuid4()}",
+    )
+
+    await storage.state.save_notification(notification)
+    logger.info("POST /notifications/test created notification_id=%s for user_id=%s", notification_id, session.user_id)
+
+    # Also publish a WebSocket event for real-time UI update
+    from shared.schemas.events import DomusEvent, EventType
+    notification_event = DomusEvent(
+        type=EventType.NOTIFICATION_CREATED,
+        payload={
+            "notification_id": str(notification_id),
+            "title": title,
+            "body": body,
+            "notification_type": "proactive",
+            "event_id": "test_event_001",
+        }
+    )
+    await storage.events.publish(notification_event, session.user_id)
+
+    return {
+        "notification_id": str(notification_id),
+        "title": title,
+        "body": body,
+        "message": "Test notification created and pushed via WebSocket"
+    }
+
+
+# ============================================================================
+# Push Notification Configuration (Demo)
+# ============================================================================
+
+class SetDeviceTokenRequest(BaseModel):
+    """Request to set demo device token."""
+    token: str
+
+
+@router.post("/push/device-token", tags=["push"])
+async def set_device_token(
+    request: SetDeviceTokenRequest,
+    session: UserSession = Depends(get_current_session),
+):
+    """
+    Set the demo device token for iOS push notifications.
+
+    Get this token from iOS app console logs after push registration.
+    Use this to configure the backend to send pushes to your test device.
+    """
+    from ..services.push_notification_service import get_push_notification_service
+
+    push_service = get_push_notification_service()
+    push_service.set_demo_token(request.token)
+
+    return {
+        "message": "Device token set successfully",
+        "configured": push_service.is_configured
+    }
+
+
+@router.get("/push/status", tags=["push"])
+async def get_push_status(
+    session: UserSession = Depends(get_current_session),
+):
+    """
+    Check push notification configuration status.
+
+    Returns whether FCM is configured and ready to send notifications.
+    """
+    from ..services.push_notification_service import get_push_notification_service
+
+    push_service = get_push_notification_service()
+
+    return {
+        "configured": push_service.is_configured,
+        "has_server_key": bool(push_service.fcm_server_key),
+        "has_device_token": bool(push_service.demo_device_token),
+    }
+
+
+@router.post("/push/test", tags=["push"])
+async def send_test_push(
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """
+    Send a test push notification to the configured demo device.
+
+    This sends an actual iOS push notification and also creates a
+    notification record for the bell panel.
+    """
+    from uuid import uuid4
+    from ..services.push_notification_service import get_push_notification_service
+
+    push_service = get_push_notification_service()
+
+    if not push_service.is_configured:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Push not configured. Set FCM_SERVER_KEY env var and call POST /push/device-token first."
+        )
+
+    notification_id = uuid4()
+    title = "Test Push from Domus"
+    body = "Tap to open the app and continue the conversation"
+    chat_seed_content = f"{title}\n\n{body}"
+
+    # Create notification record
+    notification = NotificationRecord(
+        notification_id=notification_id,
+        user_id=session.user_id,
+        title=title,
+        body=body,
+        notification_type="proactive",
+        chat_seed_content=chat_seed_content,
+        idempotency_key=f"test_push_{uuid4()}",
+    )
+    await storage.state.save_notification(notification)
+
+    # Send actual iOS push
+    result = await push_service.send_notification(
+        user_id=session.user_id,
+        title=title,
+        body=body,
+        notification_id=str(notification_id),
+    )
+
+    # Also emit WebSocket event
+    from shared.schemas.events import DomusEvent, EventType
+    notification_event = DomusEvent(
+        type=EventType.NOTIFICATION_CREATED,
+        payload={
+            "notification_id": str(notification_id),
+            "title": title,
+            "body": body,
+            "notification_type": "proactive",
+        }
+    )
+    await storage.events.publish(notification_event, session.user_id)
+
+    return {
+        "notification_id": str(notification_id),
+        "push_sent": result.success,
+        "push_message_id": result.message_id,
+        "push_error": result.error,
+        "message": "Test push sent" if result.success else f"Push failed: {result.error}"
     }

@@ -226,6 +226,12 @@ class NotificationRecord(BaseModel):
     # Idempotency
     idempotency_key: Optional[str] = None  # e.g., "event_123_48h_reminder"
 
+    # ChatSeed: Pre-seeded assistant message for proactive notifications.
+    # When user clicks notification, this content appears in chat verbatim.
+    chat_seed_content: Optional[str] = None  # EXACT notification text (title + body)
+    event_id: Optional[str] = None  # Calendar event that triggered this notification
+    notification_type: str = "chat"  # "chat" | "proactive" for UI labeling
+
 
 # ============================================================================
 # Approval State

@@ -5,3 +5,5 @@ dist/
 .vscode/
 .DS_Store
 *.sqlite
+firebase-service-account.json
+secrets/
