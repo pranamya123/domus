@@ -6,11 +6,17 @@ Application settings with environment variable support.
 
 from functools import lru_cache
 from typing import Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment."""
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="DOMUS_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
     # App
     app_name: str = "Domus"
@@ -43,9 +49,6 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
     ]
 
-    class Config:
-        env_file = ".env"
-        env_prefix = "DOMUS_"
 
 
 @lru_cache

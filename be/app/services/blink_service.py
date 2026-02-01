@@ -58,19 +58,23 @@ class BlinkService:
         return self._client_session
 
     async def login(self, user_id: str, email: str, password: str) -> dict:
-        """
-        Initiate Blink login. Returns account info and triggers 2FA if required.
-        """
         try:
             session = await self._get_http_session()
             blink = Blink(session=session)
             auth = Auth({"username": email, "password": password}, session=session)
+
             blink.auth = auth
+            blink.auth.no_save = True  # prevent cached token reuse
 
             try:
                 await blink.start()
             except BlinkTwoFARequiredError:
-                pending = BlinkSession(blink=blink, auth=auth, verified=False, email=email)
+                pending = BlinkSession(
+                    blink=blink,
+                    auth=blink.auth,
+                    verified=False,
+                    email=email,
+                )
                 self._pending_auth[user_id] = pending
                 logger.info("Blink login requires 2FA for user %s", user_id)
                 return {
@@ -79,10 +83,14 @@ class BlinkService:
                     "message": "2FA code sent to your email/phone",
                 }
 
-            verified_session = BlinkSession(blink=blink, auth=auth, verified=True, email=email)
+            # success path
+            verified_session = BlinkSession(
+                blink=blink,
+                auth=blink.auth,
+                verified=True,
+                email=email,
+            )
             self._sessions[user_id] = verified_session
-            if user_id in self._pending_auth:
-                del self._pending_auth[user_id]
 
             logger.info("Blink login successful for user %s (no 2FA)", user_id)
             return {
