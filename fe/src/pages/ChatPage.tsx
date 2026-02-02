@@ -2,11 +2,13 @@
  * Chat Page - Exact mockup specs
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useApi } from '../hooks/useApi';
 import { AgentType, AgentStatus } from '../types';
+
+const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : 'http://localhost:8000/api';
 
 // Agent detection keywords
 const AGENT_KEYWORDS: Record<string, string[]> = {
@@ -40,6 +42,8 @@ export function ChatPage() {
   const [blink2FA, setBlink2FA] = useState('');
   const [blinkError, setBlinkError] = useState('');
   const [blinkLoading, setBlinkLoading] = useState(false);
+  const [showMediaPreview, setShowMediaPreview] = useState(false);
+  const [mediaTimestamp, setMediaTimestamp] = useState(Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const user = useStore((state) => state.user);
@@ -49,7 +53,12 @@ export function ChatPage() {
   const capabilities = useStore((state) => state.capabilities);
 
   const { isConnected, sendMessage } = useWebSocket();
-  const { blinkLogin, blinkVerify } = useApi();
+  const { blinkLogin, blinkVerify, token } = useApi();
+
+  // Refresh media when Blink connects
+  const refreshMedia = useCallback(() => {
+    setMediaTimestamp(Date.now());
+  }, []);
 
   const fridgeStatus = agentStatus[AgentType.FRIDGE];
   const isAgentActivating = fridgeStatus === AgentStatus.ACTIVATING || activatingAgent !== null;
@@ -104,6 +113,10 @@ export function ChatPage() {
     setMenuOpen(false);
     if (!capabilities.blink_connected) {
       setBlinkStep('connect');
+    } else {
+      // Show media preview if already connected
+      refreshMedia();
+      setShowMediaPreview(true);
     }
   };
 

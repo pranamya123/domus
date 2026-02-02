@@ -24,6 +24,11 @@ interface BlinkVerifyResponse {
   capabilities: CapabilitiesPayload;
 }
 
+interface MediaStatus {
+  thumbnail: { available: boolean; size_bytes: number; modified_at: string } | null;
+  video: { available: boolean; size_bytes: number; modified_at: string } | null;
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {},
@@ -146,6 +151,18 @@ export function useApi() {
     return response;
   }, [token, setCapabilities]);
 
+  const getMediaStatus = useCallback(async (): Promise<MediaStatus> => {
+    return fetchApi<MediaStatus>('/media/status', {}, token);
+  }, [token]);
+
+  const getMediaThumbnailUrl = useCallback((): string => {
+    return `${API_BASE}/media/thumbnail`;
+  }, []);
+
+  const getMediaVideoUrl = useCallback((): string => {
+    return `${API_BASE}/media/video`;
+  }, []);
+
   return {
     login,
     logout: doLogout,
@@ -153,5 +170,9 @@ export function useApi() {
     healthCheck,
     blinkLogin,
     blinkVerify,
+    getMediaStatus,
+    getMediaThumbnailUrl,
+    getMediaVideoUrl,
+    token,
   };
 }

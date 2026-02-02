@@ -71,6 +71,7 @@ class FridgeInventoryService:
             user_id=user_id,
             items=items,
             captured_at=datetime.utcnow(),
+            thumbnail_b64=image_b64,
             confidence=1.0 if items else 0.0,
         )
         await self._storage.state.save_inventory(snapshot)
@@ -128,4 +129,5 @@ class FridgeInventoryService:
         return {
             "items": items,
             "captured_at": snapshot.captured_at.isoformat() + "Z",
+            "thumbnail_b64": snapshot.thumbnail_b64,
         }

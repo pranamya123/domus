@@ -102,6 +102,12 @@ class BlinkConnectionWorkflow(BaseModel):
     # Connection result
     blink_account_id: Optional[str] = None
     cameras: list[dict[str, Any]] = Field(default_factory=list)
+    fridge_camera_name: Optional[str] = None
+    latest_video_url: Optional[str] = None
+    latest_video_timestamp: Optional[datetime] = None
+    latest_video_camera_name: Optional[str] = None
+    latest_video_metadata: Optional[dict[str, Any]] = None
+    latest_video_base64: Optional[str] = None
 
     # Timestamps
     started_at: datetime = Field(default_factory=datetime.utcnow)
@@ -156,6 +162,7 @@ class InventorySnapshot(BaseModel):
     items: list[InventoryItem] = Field(default_factory=list)
     captured_at: datetime = Field(default_factory=datetime.utcnow)
     image_hash: Optional[str] = None
+    thumbnail_b64: Optional[str] = None
     confidence: float = 0.0
 
     def get_item_names(self) -> list[str]:

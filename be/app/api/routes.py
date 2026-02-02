@@ -5,10 +5,13 @@ Authentication, capabilities, and screen routing endpoints.
 """
 
 from datetime import datetime
+import logging
+from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 
@@ -35,8 +38,12 @@ from ..storage.redis_store import RedisDomusStorage
 from ..services.blink_service import get_blink_service
 from ..services.fridge_inventory_service import FridgeInventoryService
 
+# Media storage path
+MEDIA_DIR = Path(__file__).resolve().parent.parent / "storage" / "media"
+
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 # Storage instance (set during app startup)
 _storage: Optional[RedisDomusStorage] = None
@@ -153,6 +160,8 @@ class BlinkVerifyResponse(BaseModel):
     success: bool
     message: str
     capabilities: CapabilitiesPayload
+
+
 
 
 class FridgeRefreshRequest(BaseModel):
@@ -283,6 +292,26 @@ async def blink_login(
     if not requires_2fa:
         workflow.completed_at = datetime.utcnow()
 
+    if not requires_2fa:
+        cameras_result = await blink_service.get_cameras(session.user_id)
+        if cameras_result.get("success"):
+            workflow.cameras = cameras_result.get("cameras", [])
+            if not workflow.fridge_camera_name and workflow.cameras:
+                workflow.fridge_camera_name = workflow.cameras[0].get("name")
+            if not workflow.fridge_camera_name and not workflow.cameras:
+                workflow.fridge_camera_name = "Outdoor 4 - KLHX"
+            logger.info(
+                "Blink cameras discovered (user=%s cameras=%s)",
+                session.user_id,
+                [cam.get("name") for cam in workflow.cameras],
+            )
+            media_result = await blink_service.sync_latest_media(
+                session.user_id,
+                workflow.fridge_camera_name or "Outdoor 4 - KLHX",
+                force_video=True,  # Always download video on connect
+            )
+            logger.info("Blink media synced on connect (user=%s result=%s)", session.user_id, media_result)
+
     await storage.state.save_blink_workflow(workflow)
 
     # Update capabilities if fully connected
@@ -355,6 +384,26 @@ async def blink_verify_2fa(
     workflow.completed_at = datetime.utcnow()
     workflow.last_updated = datetime.utcnow()
     workflow.error_message = None
+
+    cameras_result = await blink_service.get_cameras(session.user_id)
+    if cameras_result.get("success"):
+        workflow.cameras = cameras_result.get("cameras", [])
+        if not workflow.fridge_camera_name and workflow.cameras:
+            workflow.fridge_camera_name = workflow.cameras[0].get("name")
+        if not workflow.fridge_camera_name and not workflow.cameras:
+            workflow.fridge_camera_name = "Outdoor 4 - KLHX"
+        logger.info(
+            "Blink cameras discovered (user=%s cameras=%s)",
+            session.user_id,
+            [cam.get("name") for cam in workflow.cameras],
+        )
+        media_result = await blink_service.sync_latest_media(
+            session.user_id,
+            workflow.fridge_camera_name or "Outdoor 4 - KLHX",
+            force_video=True,  # Always download video on connect
+        )
+        logger.info("Blink media synced on connect (user=%s result=%s)", session.user_id, media_result)
+
     await storage.state.save_blink_workflow(workflow)
 
     # Update capabilities
@@ -412,6 +461,98 @@ async def get_fridge_inventory(
             detail="No inventory snapshot found",
         )
     return inventory
+
+
+
+
+# ============================================================================
+# Media Endpoints (Latest Thumbnail & Video)
+# ============================================================================
+
+@router.get("/media/thumbnail", tags=["media"])
+async def get_latest_thumbnail(
+    session: UserSession = Depends(get_current_session),
+):
+    """
+    Get the latest thumbnail from Blink camera.
+
+    Returns the most recent thumbnail image (JPEG).
+    Updated on connect and when motion is detected.
+    """
+    thumbnail_path = MEDIA_DIR / "latest_thumbnail.jpg"
+
+    if not thumbnail_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No thumbnail available. Connect Blink camera first."
+        )
+
+    return FileResponse(
+        path=thumbnail_path,
+        media_type="image/jpeg",
+        filename="latest_thumbnail.jpg",
+    )
+
+
+@router.get("/media/video", tags=["media"])
+async def get_latest_video(
+    session: UserSession = Depends(get_current_session),
+):
+    """
+    Get the latest video clip from Blink camera.
+
+    Returns the most recent video clip (MP4).
+    Updated on connect and when motion is detected.
+    """
+    video_path = MEDIA_DIR / "latest_clip.mp4"
+
+    if not video_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No video available. Connect Blink camera first."
+        )
+
+    return FileResponse(
+        path=video_path,
+        media_type="video/mp4",
+        filename="latest_clip.mp4",
+    )
+
+
+@router.get("/media/status", tags=["media"])
+async def get_media_status(
+    session: UserSession = Depends(get_current_session),
+):
+    """
+    Get status of available media files.
+
+    Returns info about latest thumbnail and video including file sizes and timestamps.
+    """
+    thumbnail_path = MEDIA_DIR / "latest_thumbnail.jpg"
+    video_path = MEDIA_DIR / "latest_clip.mp4"
+
+    result = {
+        "thumbnail": None,
+        "video": None,
+    }
+
+    if thumbnail_path.exists():
+        stat = thumbnail_path.stat()
+        result["thumbnail"] = {
+            "available": True,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        }
+
+    if video_path.exists():
+        stat = video_path.stat()
+        result["video"] = {
+            "available": True,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        }
+
+    return result
 
 
 # ============================================================================

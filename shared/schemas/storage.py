@@ -216,6 +216,11 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
+    async def get_domus_state_by_user_id(self, user_id: str) -> Optional[DomusState]:
+        """Get full aggregate state for user."""
+        pass
+
+    @abstractmethod
     async def save_domus_state(self, state: DomusState) -> None:
         """Save aggregate state."""
         pass

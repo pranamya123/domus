@@ -46,6 +46,7 @@ class MemoryStateStore(StateStore):
         self._approvals: dict[str, ApprovalRecord] = {}
         self._user_approvals: dict[str, set] = {}
         self._domus_state: dict[str, DomusState] = {}
+        self._domus_state_by_user: dict[str, str] = {}
 
     async def create_session(self, session: UserSession) -> None:
         self._sessions[str(session.session_id)] = session
@@ -184,8 +185,15 @@ class MemoryStateStore(StateStore):
     async def get_domus_state(self, session_id: UUID) -> Optional[DomusState]:
         return self._domus_state.get(str(session_id))
 
+    async def get_domus_state_by_user_id(self, user_id: str) -> Optional[DomusState]:
+        session_id = self._domus_state_by_user.get(user_id)
+        if not session_id:
+            return None
+        return self._domus_state.get(session_id)
+
     async def save_domus_state(self, state: DomusState) -> None:
         self._domus_state[str(state.session.session_id)] = state
+        self._domus_state_by_user[state.session.user_id] = str(state.session.session_id)
 
 
 class MemoryEventStore(EventStore):

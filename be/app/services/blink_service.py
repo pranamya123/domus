@@ -5,8 +5,11 @@ Handles authentication and camera operations with Blink cameras.
 Uses blinkpy to avoid REST login "app update required" errors.
 """
 
+import hashlib
 import logging
 import ssl
+import asyncio
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Any
@@ -16,9 +19,10 @@ import certifi
 from blinkpy.blinkpy import Blink
 from blinkpy.auth import Auth, BlinkTwoFARequiredError
 
-import base64
-from typing import Any
 logger = logging.getLogger(__name__)
+
+# Hardcoded camera name
+CAMERA_NAME = "Outdoor 4 - KLHX"
 
 
 @dataclass
@@ -38,12 +42,16 @@ class BlinkService:
     Handles:
     - Authentication (login + 2FA)
     - Camera listing
+    - Fetching latest media (thumbnail + video) from Blink cloud
     """
 
     def __init__(self):
-        self._sessions: dict[str, BlinkSession] = {}  # user_id -> session
-        self._pending_auth: dict[str, BlinkSession] = {}  # user_id -> pending auth
+        self._sessions: dict[str, BlinkSession] = {}
+        self._pending_auth: dict[str, BlinkSession] = {}
         self._client_session: Optional[aiohttp.ClientSession] = None
+        self._media_dir = Path(__file__).resolve().parent.parent / "storage" / "media"
+        # Track last thumbnail hash to detect changes
+        self._last_thumbnail_hash: dict[str, str] = {}
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context using certifi certificates."""
@@ -58,13 +66,14 @@ class BlinkService:
         return self._client_session
 
     async def login(self, user_id: str, email: str, password: str) -> dict:
+        """Login to Blink with email and password."""
         try:
             session = await self._get_http_session()
             blink = Blink(session=session)
             auth = Auth({"username": email, "password": password}, session=session)
 
             blink.auth = auth
-            blink.auth.no_save = True  # prevent cached token reuse
+            blink.auth.no_save = True
 
             try:
                 await blink.start()
@@ -83,7 +92,6 @@ class BlinkService:
                     "message": "2FA code sent to your email/phone",
                 }
 
-            # success path
             verified_session = BlinkSession(
                 blink=blink,
                 auth=blink.auth,
@@ -91,6 +99,7 @@ class BlinkService:
                 email=email,
             )
             self._sessions[user_id] = verified_session
+            await self._ensure_camera_armed(blink, CAMERA_NAME)
 
             logger.info("Blink login successful for user %s (no 2FA)", user_id)
             return {
@@ -104,9 +113,7 @@ class BlinkService:
             return {"success": False, "error": str(e)}
 
     async def verify_2fa(self, user_id: str, pin: str) -> dict:
-        """
-        Verify 2FA PIN code.
-        """
+        """Verify 2FA PIN code."""
         pending = self._pending_auth.get(user_id)
         if not pending:
             return {"success": False, "error": "No pending authentication. Please login again."}
@@ -122,6 +129,7 @@ class BlinkService:
             pending.verified = True
             self._sessions[user_id] = pending
             del self._pending_auth[user_id]
+            await self._ensure_camera_armed(pending.blink, CAMERA_NAME)
 
             logger.info("Blink 2FA verified for user %s", user_id)
             return {"success": True, "message": "Blink camera connected successfully"}
@@ -139,10 +147,12 @@ class BlinkService:
         """Get user's Blink session if connected."""
         return self._sessions.get(user_id)
 
+    def get_connected_user_ids(self) -> list[str]:
+        """Return all user IDs that currently have a verified Blink session."""
+        return [uid for uid, s in self._sessions.items() if s.verified]
+
     async def get_cameras(self, user_id: str) -> dict:
-        """
-        Get list of cameras for the user.
-        """
+        """Get list of cameras for the user."""
         session = self._sessions.get(user_id)
         if not session or not session.verified:
             return {"success": False, "error": "Not connected to Blink"}
@@ -155,11 +165,10 @@ class BlinkService:
                     cameras.append({
                         "id": camera.camera_id,
                         "name": name,
-                        "network_id": camera.network_id if hasattr(camera, "network_id") else None,
-                        "status": camera.arm if hasattr(camera, "arm") else None,
-                        "type": camera.camera_type if hasattr(camera, "camera_type") else None,
+                        "network_id": getattr(camera, "network_id", None),
+                        "status": getattr(camera, "arm", None),
+                        "type": getattr(camera, "camera_type", None),
                     })
-
             return {"success": True, "cameras": cameras}
 
         except Exception as e:
@@ -168,207 +177,162 @@ class BlinkService:
 
     def disconnect(self, user_id: str) -> dict:
         """Disconnect Blink session for user."""
-        if user_id in self._sessions:
-            del self._sessions[user_id]
-        if user_id in self._pending_auth:
-            del self._pending_auth[user_id]
+        self._sessions.pop(user_id, None)
+        self._pending_auth.pop(user_id, None)
+        self._last_thumbnail_hash.pop(user_id, None)
         logger.info("Blink disconnected for user %s", user_id)
         return {"success": True, "message": "Disconnected from Blink"}
 
-    async def capture_camera_frame(self, user_id: str, camera_name: str | None = None) -> dict:
+    async def _ensure_camera_armed(self, blink: Any, camera_name: str) -> None:
+        """Ensure camera is armed for motion detection."""
+        try:
+            cam = blink.cameras.get(camera_name) if getattr(blink, "cameras", None) else None
+            if not cam:
+                logger.info("Blink arm skipped (camera not found) camera=%s", camera_name)
+                return
+            arm_fn = getattr(cam, "async_arm", None)
+            if callable(arm_fn):
+                await arm_fn(True)
+                logger.info("Camera armed for motion detection (camera=%s)", camera_name)
+        except Exception as exc:
+            logger.warning("Blink arm failed (camera=%s): %s", camera_name, exc)
+
+    async def sync_latest_media(self, user_id: str, camera_name: str = CAMERA_NAME, force_video: bool = False) -> dict:
         """
-        Capture a single still image from a Blink camera.
+        Fetch the latest thumbnail and video from Blink.
+
+        1. Refresh to get latest thumbnail from cache
+        2. If thumbnail changed (or force_video=True), download latest video from cloud
+        3. Save both to storage/media/
+
+        Args:
+            user_id: User ID
+            camera_name: Camera name
+            force_video: If True, always download video (use on connect)
 
         Returns:
-          {
-            "success": True,
-            "camera_id": "...",
-            "camera_name": "...",
-            "captured_at": "...",
-            "image_bytes_b64": "..."
-          }
+            dict with success status, paths, and whether thumbnail changed
         """
         session = self._sessions.get(user_id)
         if not session or not session.verified:
             return {"success": False, "error": "Not connected to Blink"}
 
         try:
-            await session.blink.refresh()
+            self._media_dir.mkdir(parents=True, exist_ok=True)
+            thumbnail_path = self._media_dir / "latest_thumbnail.jpg"
+            video_path = self._media_dir / "latest_clip.mp4"
 
-            if not session.blink.cameras:
-                return {"success": False, "error": "No cameras found"}
+            # Step 1: Refresh to get latest thumbnail
+            logger.info("Refreshing Blink (user=%s camera=%s)", user_id, camera_name)
+            await session.blink.refresh(force=True)
 
-            # Choose camera
-            cam = None
-            if camera_name:
-                cam = session.blink.cameras.get(camera_name)
-                if cam is None:
-                    return {"success": False, "error": f"Camera '{camera_name}' not found"}
+            cam = session.blink.cameras.get(camera_name)
+            if cam is None:
+                return {"success": False, "error": f"Camera '{camera_name}' not found"}
+
+            # Step 2: Get and save thumbnail
+            image_bytes = getattr(cam, "image_from_cache", None)
+            thumbnail_changed = False
+
+            if isinstance(image_bytes, (bytes, bytearray)) and len(image_bytes) > 0:
+                # Check if thumbnail changed
+                new_hash = hashlib.md5(image_bytes).hexdigest()
+                old_hash = self._last_thumbnail_hash.get(user_id)
+
+                if new_hash != old_hash:
+                    thumbnail_changed = True
+                    self._last_thumbnail_hash[user_id] = new_hash
+                    logger.info("Thumbnail changed (user=%s old=%s new=%s)", user_id, old_hash, new_hash)
+
+                thumbnail_path.write_bytes(image_bytes)
+                logger.info("Saved thumbnail (%d bytes) to %s", len(image_bytes), thumbnail_path)
             else:
-                # Default: first camera in dict
-                cam = next(iter(session.blink.cameras.values()))
+                logger.warning("No thumbnail in cache for camera=%s", camera_name)
 
-            # Request a fresh snapshot if supported
-            snap_fn = getattr(cam, "snap_picture", None)
-            if callable(snap_fn):
-                res = snap_fn()
-                if hasattr(res, "__await__"):
-                    await res
-
-            # Refresh to load the new image
-            await session.blink.refresh()
-
-            # Try to extract image bytes (defensive across blinkpy versions)
-            img_bytes: bytes | None = None
-
-            # Some versions expose "image" or "image_data"
-            for attr in ("image", "image_data", "thumbnail", "thumbnail_data"):
-                val = getattr(cam, attr, None)
-                if isinstance(val, (bytes, bytearray)) and len(val) > 0:
-                    img_bytes = bytes(val)
-                    break
-
-            # Some versions have helpers
-            if img_bytes is None:
-                get_img = getattr(cam, "get_image", None)
-                if callable(get_img):
-                    res = get_img()
-                    if hasattr(res, "__await__"):
-                        res = await res
-                    if isinstance(res, (bytes, bytearray)) and len(res) > 0:
-                        img_bytes = bytes(res)
-
-            if img_bytes is None:
-                return {
-                    "success": False,
-                    "error": "Unable to fetch camera image bytes (blinkpy API mismatch). "
-                             "Check camera object for image accessors."
-                }
+            # Step 3: Download video if thumbnail changed or forced
+            video_downloaded = False
+            if force_video or thumbnail_changed:
+                logger.info("Downloading latest video from cloud (user=%s force=%s changed=%s)",
+                           user_id, force_video, thumbnail_changed)
+                video_downloaded = await self._download_latest_video(session.blink, camera_name, video_path)
 
             return {
                 "success": True,
-                "camera_id": getattr(cam, "camera_id", None),
-                "camera_name": getattr(cam, "name", camera_name) or camera_name or "default",
-                "captured_at": datetime.utcnow().isoformat() + "Z",
-                "image_bytes_b64": base64.b64encode(img_bytes).decode("utf-8"),
+                "thumbnail_path": str(thumbnail_path) if thumbnail_path.exists() else None,
+                "video_path": str(video_path) if video_path.exists() else None,
+                "thumbnail_changed": thumbnail_changed,
+                "video_downloaded": video_downloaded,
+                "camera_name": camera_name,
             }
 
         except Exception as e:
-            logger.error("Error capturing camera frame for user %s: %s", user_id, e)
+            logger.error("Error syncing media for user %s: %s", user_id, e)
             return {"success": False, "error": str(e)}
 
-
-    def get_connected_user_ids(self) -> list[str]:
-        """Return all user IDs that currently have a verified Blink session."""
-        return [
-            user_id
-            for user_id, session in self._sessions.items()
-            if session.verified
-        ]
-
-    async def get_recent_motion_events(
-        self, user_id: str, camera_name: str | None = None
-    ) -> list[dict]:
+    async def _download_latest_video(self, blink: Blink, camera_name: str, video_path: Path) -> bool:
         """
-        Get recent motion events for the specified Blink user (and optional camera).
+        Download the latest video clip from Blink cloud.
 
-        Returns normalized event payloads. Defensive across blinkpy versions.
+        Returns True if video was downloaded successfully.
         """
-        session = self._sessions.get(user_id)
-        if not session or not session.verified:
-            return []
-
         try:
-            await session.blink.refresh()
-        except Exception as e:
-            logger.error("Failed to refresh Blink for motion events (user=%s): %s", user_id, e)
-            return []
+            # Create temp directory for download
+            temp_dir = self._media_dir / "temp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
 
-        cameras = []
-        if camera_name:
-            cam = session.blink.cameras.get(camera_name)
+            # Clean up any existing temp files first
+            for f in temp_dir.glob("*.mp4"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+            # Use download_videos to fetch from cloud
+            download_fn = getattr(blink, "download_videos", None)
+            if callable(download_fn):
+                logger.info("Calling download_videos (camera=%s path=%s)", camera_name, temp_dir)
+                result = download_fn(str(temp_dir), camera=camera_name, stop=1, delay=1)
+                if hasattr(result, "__await__"):
+                    await result
+
+                # Find downloaded mp4 files
+                mp4_files = sorted(temp_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+                if mp4_files:
+                    latest = mp4_files[0]
+                    file_size = latest.stat().st_size
+
+                    # Move to final location
+                    if video_path.exists():
+                        video_path.unlink()
+                    latest.rename(video_path)
+                    logger.info("✅ Saved video (%d bytes) to %s", file_size, video_path)
+
+                    # Clean up other temp files
+                    for f in temp_dir.glob("*.mp4"):
+                        try:
+                            f.unlink()
+                        except Exception:
+                            pass
+
+                    return True
+                else:
+                    logger.warning("No video files downloaded from cloud (Blink may still be uploading)")
+
+            # Fallback: try video_from_cache (usually won't have latest)
+            cam = blink.cameras.get(camera_name)
             if cam:
-                cameras.append((camera_name, cam))
-        else:
-            cameras.extend(session.blink.cameras.items())
+                video_bytes = getattr(cam, "video_from_cache", None)
+                if isinstance(video_bytes, (bytes, bytearray)) and len(video_bytes) > 0:
+                    video_path.write_bytes(video_bytes)
+                    logger.info("✅ Saved video from cache (%d bytes) to %s", len(video_bytes), video_path)
+                    return True
 
-        events: list[dict] = []
-        for name, cam in cameras:
-            if not cam:
-                continue
+            return False
 
-            timestamp = self._extract_motion_timestamp(cam)
-            if not timestamp:
-                continue
-
-            camera_id = getattr(cam, "camera_id", None) or name
-            events.append({
-                "camera_id": camera_id,
-                "camera_name": name,
-                "timestamp": self._format_timestamp(timestamp),
-                "type": "motion",
-            })
-
-        return events
-
-    def _extract_motion_timestamp(self, camera: Any) -> Optional[datetime]:
-        candidates = []
-        motion_events = getattr(camera, "motion_events", None)
-        if isinstance(motion_events, list) and motion_events:
-            candidates.append(motion_events[0])
-
-        attrs = [
-            "last_motion",
-            "last_motion_time",
-            "last_event_time",
-            "last_recording",
-            "last_recording_time",
-            "last_image_fetch",
-        ]
-
-        for attr in attrs:
-            candidates.append(getattr(camera, attr, None))
-
-        for raw in candidates:
-            parsed = self._parse_motion_datetime(raw)
-            if parsed:
-                return parsed
-
-        return None
-
-    def _parse_motion_datetime(self, raw: Any) -> Optional[datetime]:
-        if isinstance(raw, datetime):
-            return raw
-
-        if isinstance(raw, dict):
-            for key in ("timestamp", "time", "date"):
-                parsed = self._parse_motion_datetime(raw.get(key))
-                if parsed:
-                    return parsed
-            return None
-
-        if isinstance(raw, str):
-            value = raw.strip()
-            if not value:
-                return None
-            if value.endswith("Z"):
-                value = value[:-1] + "+00:00"
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-                    try:
-                        return datetime.strptime(value, fmt)
-                    except ValueError:
-                        continue
-        return None
-
-    def _format_timestamp(self, timestamp: Optional[datetime]) -> str:
-        ts = timestamp or datetime.utcnow()
-        if ts.tzinfo:
-            ts = ts.astimezone()
-        return ts.replace(microsecond=0).isoformat() + "Z"
-
+        except Exception as e:
+            logger.error("Error downloading video: %s", e)
+            return False
 
 
 # Singleton instance

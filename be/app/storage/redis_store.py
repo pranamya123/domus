@@ -74,6 +74,7 @@ class RedisKeys:
 
     # State aggregate
     DOMUS_STATE = "state:{session_id}"
+    DOMUS_STATE_BY_USER = "state:user:{user_id}"
 
     # Events
     EVENT_STREAM = "events:user:{user_id}"
@@ -396,11 +397,23 @@ class RedisStateStore(StateStore):
         data = await self._client.get(key)
         return _deserialize(data, DomusState) if data else None
 
+    async def get_domus_state_by_user_id(self, user_id: str) -> Optional[DomusState]:
+        """Get full aggregate state for user."""
+        key = RedisKeys.DOMUS_STATE_BY_USER.format(user_id=user_id)
+        session_id = await self._client.get(key)
+        if not session_id:
+            return None
+        return await self.get_domus_state(UUID(session_id.decode()))
+
     async def save_domus_state(self, state: DomusState) -> None:
         """Save aggregate state."""
         key = RedisKeys.DOMUS_STATE.format(session_id=state.session.session_id)
+        user_key = RedisKeys.DOMUS_STATE_BY_USER.format(user_id=state.session.user_id)
         ttl = int((state.session.expires_at - datetime.utcnow()).total_seconds())
-        await self._client.setex(key, max(ttl, 1), _serialize(state))
+        pipe = self._client.pipeline()
+        pipe.setex(key, max(ttl, 1), _serialize(state))
+        pipe.setex(user_key, max(ttl, 1), str(state.session.session_id))
+        await pipe.execute()
 
 
 # ============================================================================
