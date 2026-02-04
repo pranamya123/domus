@@ -46,6 +46,58 @@ class AgentResponse:
     approval_data: Optional[dict] = None
 
 
+class InteractionPhase(str, Enum):
+    """Phases of a multi-turn conversation"""
+    INITIAL = "initial"                    # First message in a flow
+    OFFERED_OPTIONS = "offered_options"    # Assistant offered options to user
+    EXPANDING_OPTIONS = "expanding_options"  # User asked to see options
+    FOLLOW_UP = "follow_up"                # User asking follow-up questions
+    COMPLETED = "completed"                # Flow completed
+
+
+@dataclass
+class ConversationState:
+    """
+    Tracks conversation state across turns.
+
+    This is critical for maintaining context when users send short
+    acknowledgments like "Yes" or "Show options".
+    """
+    conversation_id: str
+    user_id: str
+    session_id: str
+    active_intent: Optional[str] = None
+    interaction_phase: InteractionPhase = InteractionPhase.INITIAL
+    last_assistant_message: Optional[str] = None
+    last_user_message: Optional[str] = None
+    last_structured_output_type: Optional[str] = None  # e.g., "OPTIONS_OFFER", "OPTIONS_LIST"
+    intent_context: dict = field(default_factory=dict)  # Additional context for the intent
+    turn_count: int = 0
+
+    def is_mid_conversation(self) -> bool:
+        """Check if we're in the middle of a conversation flow."""
+        return (
+            self.active_intent is not None or
+            self.interaction_phase != InteractionPhase.INITIAL or
+            self.last_assistant_message is not None
+        )
+
+    def assistant_asked_followup(self) -> bool:
+        """Check if the last assistant message asked a follow-up question."""
+        if not self.last_assistant_message:
+            return False
+        followup_indicators = [
+            "?",
+            "show options",
+            "would you like",
+            "want me to",
+            "which option",
+            "let me know",
+        ]
+        msg_lower = self.last_assistant_message.lower()
+        return any(ind in msg_lower for ind in followup_indicators)
+
+
 @dataclass
 class AgentContext:
     """Context passed to agents for processing"""
@@ -58,6 +110,7 @@ class AgentContext:
     energy_data: Optional[dict] = None
     security_status: Optional[dict] = None
     user_preferences: Optional[dict] = None
+    conversation_state: Optional[ConversationState] = None
 
 
 class BaseAgent(ABC):

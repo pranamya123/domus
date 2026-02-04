@@ -5,6 +5,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
+import ReactMarkdown from 'react-markdown';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useApi } from '../hooks/useApi';
@@ -614,7 +615,28 @@ export function ChatPage() {
                   ...(msg.sender === 'user' ? styles.userMessage : styles.domusMessage),
                 }}
               >
-                <p style={styles.messageText}>{msg.content}</p>
+                {msg.sender === 'domus' ? (
+                  <div style={styles.markdownContainer}>
+                    <ReactMarkdown
+                      components={{
+                        // Custom renderers for markdown elements
+                        p: ({ children }) => <p style={styles.mdParagraph}>{children}</p>,
+                        strong: ({ children }) => <strong style={styles.mdStrong}>{children}</strong>,
+                        ul: ({ children }) => <ul style={styles.mdList}>{children}</ul>,
+                        ol: ({ children }) => <ol style={styles.mdList}>{children}</ol>,
+                        li: ({ children }) => <li style={styles.mdListItem}>{children}</li>,
+                        h1: ({ children }) => <h1 style={styles.mdH1}>{children}</h1>,
+                        h2: ({ children }) => <h2 style={styles.mdH2}>{children}</h2>,
+                        h3: ({ children }) => <h3 style={styles.mdH3}>{children}</h3>,
+                        code: ({ children }) => <code style={styles.mdCode}>{children}</code>,
+                      }}
+                    >
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <p style={styles.messageText}>{msg.content}</p>
+                )}
               </div>
             ))}
             {activatingAgent && (
@@ -1263,5 +1285,53 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '14px',
     fontWeight: 500,
     color: '#077507',
+  },
+  // Markdown styles for assistant messages
+  markdownContainer: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '14px',
+    color: '#000000',
+    lineHeight: 1.5,
+  },
+  mdParagraph: {
+    margin: '0 0 8px 0',
+    lineHeight: 1.5,
+  },
+  mdStrong: {
+    fontWeight: 600,
+    color: '#077507',
+  },
+  mdList: {
+    margin: '4px 0 8px 0',
+    paddingLeft: '20px',
+  },
+  mdListItem: {
+    margin: '4px 0',
+    lineHeight: 1.4,
+  },
+  mdH1: {
+    fontSize: '18px',
+    fontWeight: 600,
+    margin: '0 0 8px 0',
+    color: '#000000',
+  },
+  mdH2: {
+    fontSize: '16px',
+    fontWeight: 600,
+    margin: '12px 0 6px 0',
+    color: '#333333',
+  },
+  mdH3: {
+    fontSize: '14px',
+    fontWeight: 600,
+    margin: '10px 0 4px 0',
+    color: '#333333',
+  },
+  mdCode: {
+    backgroundColor: '#f0f0f0',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    fontFamily: 'monospace',
+    fontSize: '13px',
   },
 };

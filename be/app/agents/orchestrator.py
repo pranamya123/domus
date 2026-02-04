@@ -9,13 +9,83 @@ import logging
 from enum import Enum
 from typing import Optional, Callable, Awaitable
 
-from .base import BaseAgent, AgentType, AgentStatus, AgentContext, AgentResponse
+from .base import (
+    BaseAgent, AgentType, AgentStatus, AgentContext, AgentResponse,
+    ConversationState, InteractionPhase
+)
 from .fridge_agent import FridgeAgent
 from .calendar_agent import CalendarAgent
 from .instacart_agent import InstacartAgent
-from app.llm import GeminiService, get_gemini_service, SYSTEM_PROMPTS
+from app.llm import GeminiService, get_gemini_service, SYSTEM_PROMPTS, AGENT_PROMPTS
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Short Reply Expansion
+# =============================================================================
+# When user sends a short acknowledgment mid-conversation, expand it to include context
+
+SHORT_REPLY_PATTERNS = {
+    # Affirmative responses - trigger show options when in OFFERED_OPTIONS phase
+    "yes": "Yes, please show me the options.",
+    "yes please": "Yes, please show me the options.",
+    "sure": "Sure, please show me the options.",
+    "ok": "OK, please show me the options.",
+    "okay": "OK, please show me the options.",
+    "yep": "Yes, please show me the options.",
+    "yeah": "Yes, please show me the options.",
+    "go ahead": "Go ahead and show me the options.",
+    "sounds good": "Sounds good, please show me the options.",
+
+    # Explicit show options
+    "show options": "Please show me the budget meal options.",
+    "show me options": "Please show me the budget meal options.",
+    "show the options": "Please show me the budget meal options.",
+    "what are the options": "What are the budget meal options?",
+    "tell me more": "Tell me more about the budget meal options.",
+    "more details": "Please give me more details on the options.",
+    "which options": "Which budget meal options do you have?",
+}
+
+
+def is_short_reply(message: str) -> bool:
+    """Check if a message is a short reply that needs context expansion."""
+    # Short replies are typically < 5 words and contain common acknowledgment patterns
+    words = message.strip().split()
+    if len(words) > 6:
+        return False
+
+    message_lower = message.lower().strip().rstrip('?!.')
+    return message_lower in SHORT_REPLY_PATTERNS or len(words) <= 2
+
+
+def expand_short_reply(message: str, conv_state: ConversationState) -> str:
+    """
+    Expand a short reply into a full instruction with context.
+
+    When the user says "Yes" after we offered options, expand it to:
+    "Yes, please show me the budget meal options."
+    """
+    message_lower = message.lower().strip().rstrip('?!.')
+
+    # Check for exact match in patterns
+    if message_lower in SHORT_REPLY_PATTERNS:
+        expanded = SHORT_REPLY_PATTERNS[message_lower]
+        logger.info(f"Expanded '{message}' → '{expanded}' (phase: {conv_state.interaction_phase})")
+        return expanded
+
+    # If we're in OFFERED_OPTIONS phase and user gives short affirmative
+    if conv_state.interaction_phase == InteractionPhase.OFFERED_OPTIONS:
+        affirmatives = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'y']
+        if message_lower in affirmatives:
+            intent = conv_state.active_intent or "the options"
+            expanded = f"Yes, please show me {intent} options."
+            logger.info(f"Expanded affirmative '{message}' → '{expanded}'")
+            return expanded
+
+    # No expansion needed
+    return message
 
 
 # =============================================================================
@@ -28,6 +98,8 @@ class Intent(str, Enum):
     MEAL_PLANNING = "meal_planning"                      # meal + schedule
     SHOPPING_FOR_MEAL = "shopping_for_meal"              # meal + shopping
     EVENT_PREP = "event_prep"                            # bake sale, dinner party prep
+    BUDGET_MEAL_PLANNING = "budget_meal_planning"        # cheapest way to eat this week (initial)
+    BUDGET_SHOW_OPTIONS = "budget_show_options"          # show the 3 budget options
     FRIDGE_COMPREHENSIVE = "fridge_comprehensive"        # deep fridge analysis ("really")
     FRIDGE_ONLY = "fridge_only"                          # just fridge
     CALENDAR_ONLY = "calendar_only"                      # just calendar
@@ -41,6 +113,8 @@ INTENT_AGENT_BUNDLES: dict[Intent, list[AgentType]] = {
     Intent.MEAL_PLANNING: [AgentType.FRIDGE, AgentType.CALENDAR],
     Intent.SHOPPING_FOR_MEAL: [AgentType.FRIDGE, AgentType.INSTACART],
     Intent.EVENT_PREP: [AgentType.CALENDAR, AgentType.FRIDGE],  # Bake sale, dinner party prep
+    Intent.BUDGET_MEAL_PLANNING: [AgentType.FRIDGE],  # Cheapest way to eat - only needs fridge
+    Intent.BUDGET_SHOW_OPTIONS: [AgentType.FRIDGE],   # Show the 3 budget options
     Intent.FRIDGE_COMPREHENSIVE: [AgentType.FRIDGE],  # Deep analysis triggers comprehensive mode
     Intent.FRIDGE_ONLY: [AgentType.FRIDGE],
     Intent.CALENDAR_ONLY: [AgentType.CALENDAR],
@@ -51,6 +125,13 @@ INTENT_AGENT_BUNDLES: dict[Intent, list[AgentType]] = {
 
 # Intent detection rules (keyword patterns)
 INTENT_PATTERNS: dict[Intent, list[tuple[str, ...]]] = {
+    Intent.BUDGET_MEAL_PLANNING: [
+        ('cheapest', 'eat'), ('cheapest', 'week'), ('cheap', 'eat'),
+        ('budget', 'eat'), ('budget', 'meal'), ('budget', 'week'),
+        ('save', 'money', 'food'), ('save', 'money', 'eat'),
+        ('affordable', 'eat'), ('low', 'cost', 'meal'),
+        ('stretch', 'food'), ('stretch', 'groceries'),
+    ],
     Intent.NUTRITION_WITH_ACTIVITY: [
         ('workout', 'eat'), ('gym', 'eat'), ('exercise', 'meal'),
         ('training', 'food'), ('workout', 'meal'), ('workout', 'dinner'),
@@ -71,6 +152,22 @@ INTENT_PATTERNS: dict[Intent, list[tuple[str, ...]]] = {
         ('ready', 'bake'), ('ready', 'party'),
     ],
 }
+
+# Budget meal planning keywords - trigger budget intent
+BUDGET_MEAL_KEYWORDS = [
+    'cheapest way to eat', 'cheapest way to feed',
+    'budget meals', 'budget friendly',
+    'eat cheap', 'eat on a budget',
+    'save money on food', 'affordable meals',
+    'stretch my groceries', 'make food last',
+]
+
+# Follow-up keywords for showing budget options
+BUDGET_SHOW_OPTIONS_KEYWORDS = [
+    'show options', 'show me options', 'show the options',
+    'yes show', 'yes please', 'show me',
+    'what are the options', 'tell me more',
+]
 
 # Event prep keywords - trigger event prep intent
 EVENT_PREP_KEYWORDS = [
@@ -95,8 +192,59 @@ class DomusOrchestrator:
         self._agents: dict[AgentType, BaseAgent] = {}
         self._active_agent: Optional[AgentType] = None
 
+        # Conversation state store: key = "{user_id}:{session_id}"
+        self._conversation_states: dict[str, ConversationState] = {}
+
         # Initialize agents
         self._initialize_agents()
+
+    def _get_conversation_key(self, user_id: str, session_id: str) -> str:
+        """Generate a unique key for conversation state lookup."""
+        return f"{user_id}:{session_id}"
+
+    def _get_or_create_conversation_state(
+        self,
+        user_id: str,
+        session_id: str
+    ) -> ConversationState:
+        """Get existing conversation state or create a new one."""
+        key = self._get_conversation_key(user_id, session_id)
+        if key not in self._conversation_states:
+            self._conversation_states[key] = ConversationState(
+                conversation_id=key,
+                user_id=user_id,
+                session_id=session_id
+            )
+            logger.info(f"Created new conversation state for {key}")
+        return self._conversation_states[key]
+
+    def _update_conversation_state(
+        self,
+        conv_state: ConversationState,
+        user_message: str,
+        assistant_response: str,
+        intent: Optional[Intent] = None,
+        phase: Optional[InteractionPhase] = None,
+        output_type: Optional[str] = None
+    ) -> None:
+        """Update conversation state after a turn."""
+        conv_state.last_user_message = user_message
+        conv_state.last_assistant_message = assistant_response
+        conv_state.turn_count += 1
+
+        if intent:
+            conv_state.active_intent = intent.value
+            conv_state.intent_context["last_intent"] = intent.value
+
+        if phase:
+            conv_state.interaction_phase = phase
+            logger.info(f"Conversation phase → {phase.value}")
+
+        if output_type:
+            conv_state.last_structured_output_type = output_type
+
+        logger.debug(f"Conversation state updated: turn={conv_state.turn_count}, "
+                    f"intent={conv_state.active_intent}, phase={conv_state.interaction_phase}")
 
     def _initialize_agents(self):
         """Initialize all available agents."""
@@ -116,6 +264,16 @@ class DomusOrchestrator:
         Maps to an agent bundle for execution.
         """
         message_lower = message.lower()
+
+        # Check for "show options" (follow-up to budget meal planning)
+        if any(trigger in message_lower for trigger in BUDGET_SHOW_OPTIONS_KEYWORDS):
+            logger.info("Detected budget show options intent")
+            return Intent.BUDGET_SHOW_OPTIONS
+
+        # Check for budget meal planning first (most specific for this feature)
+        if any(trigger in message_lower for trigger in BUDGET_MEAL_KEYWORDS):
+            logger.info("Detected budget meal planning intent")
+            return Intent.BUDGET_MEAL_PLANNING
 
         # Check multi-agent intents first (most specific)
         for intent, patterns in INTENT_PATTERNS.items():
@@ -158,6 +316,53 @@ class DomusOrchestrator:
             return Intent.SHOPPING_ONLY
 
         return Intent.GENERAL
+
+    def _detect_intent_with_context(
+        self,
+        message: str,
+        conv_state: ConversationState
+    ) -> Intent:
+        """
+        Detect intent considering conversation state.
+
+        If we're in the middle of a conversation flow, use context to
+        determine if this is a follow-up to a previous interaction.
+        """
+        # First, try standard intent detection
+        detected_intent = self.detect_intent(message)
+
+        # If we got a specific intent, use it
+        if detected_intent != Intent.GENERAL:
+            return detected_intent
+
+        # Check if this is a follow-up to a previous interaction
+        if conv_state.is_mid_conversation():
+            logger.info(f"Mid-conversation: phase={conv_state.interaction_phase}, "
+                       f"active_intent={conv_state.active_intent}")
+
+            # If we're in OFFERED_OPTIONS phase, short affirmatives should trigger SHOW_OPTIONS
+            if conv_state.interaction_phase == InteractionPhase.OFFERED_OPTIONS:
+                message_lower = message.lower().strip()
+                affirmatives = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'y',
+                              'show', 'option', 'please', 'go ahead', 'sounds good']
+
+                if any(word in message_lower for word in affirmatives):
+                    # Check what the active intent was
+                    if conv_state.active_intent == Intent.BUDGET_MEAL_PLANNING.value:
+                        logger.info("Follow-up detected: OFFERED_OPTIONS → BUDGET_SHOW_OPTIONS")
+                        return Intent.BUDGET_SHOW_OPTIONS
+
+            # If assistant asked a follow-up question, treat as continuation
+            if conv_state.assistant_asked_followup():
+                logger.info("Assistant asked follow-up, continuing with active intent")
+                # Return the active intent to continue the flow
+                if conv_state.active_intent:
+                    try:
+                        return Intent(conv_state.active_intent)
+                    except ValueError:
+                        pass
+
+        return detected_intent
 
     def detect_agent(self, message: str) -> Optional[AgentType]:
         """
@@ -205,6 +410,7 @@ class DomusOrchestrator:
         Process a user message and return a response.
 
         Uses intent detection to determine which agent bundle to execute.
+        Maintains conversation state to handle short follow-up messages.
 
         Args:
             message: User's message
@@ -220,7 +426,19 @@ class DomusOrchestrator:
             Tuple of (AgentResponse, detected AgentType)
         """
         self._status_callback = status_callback
-        # Build context
+
+        # Step 0: Get or create conversation state
+        conv_state = self._get_or_create_conversation_state(user_id, session_id)
+        logger.info(f"Processing message: '{message[:50]}...' (turn={conv_state.turn_count}, "
+                   f"phase={conv_state.interaction_phase}, intent={conv_state.active_intent})")
+
+        # Step 0.5: Expand short replies when mid-conversation
+        original_message = message
+        if conv_state.is_mid_conversation() and is_short_reply(message):
+            message = expand_short_reply(message, conv_state)
+            logger.info(f"Short reply expansion: '{original_message}' → '{message}'")
+
+        # Build context with conversation state
         context = AgentContext(
             user_id=user_id,
             session_id=session_id,
@@ -230,11 +448,12 @@ class DomusOrchestrator:
             calendar_events=kwargs.get("calendar_events"),
             energy_data=kwargs.get("energy_data"),
             security_status=kwargs.get("security_status"),
-            user_preferences=kwargs.get("user_preferences")
+            user_preferences=kwargs.get("user_preferences"),
+            conversation_state=conv_state
         )
 
-        # Step 1: Detect intent
-        intent = self.detect_intent(message)
+        # Step 1: Detect intent (considering conversation state)
+        intent = self._detect_intent_with_context(message, conv_state)
         agent_bundle = INTENT_AGENT_BUNDLES.get(intent, [])
 
         logger.info("Intent: %s → Agents: %s", intent, [a.value for a in agent_bundle])
@@ -243,7 +462,43 @@ class DomusOrchestrator:
         if len(agent_bundle) > 1:
             # Multi-agent coordination
             response = await self._execute_agent_bundle(context, intent, agent_bundle)
+            # Update conversation state for multi-agent responses
+            self._update_conversation_state(
+                conv_state,
+                user_message=original_message,
+                assistant_response=response.content,
+                intent=intent,
+                phase=InteractionPhase.FOLLOW_UP
+            )
             return response, AgentType.ORCHESTRATOR
+
+        # Special handling for budget meal planning (initial query)
+        elif intent == Intent.BUDGET_MEAL_PLANNING:
+            response = await self._handle_budget_meal_planning(context, show_options=False)
+            # Update conversation state: we offered options, waiting for user response
+            self._update_conversation_state(
+                conv_state,
+                user_message=original_message,
+                assistant_response=response.content,
+                intent=Intent.BUDGET_MEAL_PLANNING,
+                phase=InteractionPhase.OFFERED_OPTIONS,
+                output_type="OPTIONS_OFFER"
+            )
+            return response, AgentType.FRIDGE
+
+        # Special handling for showing budget options (follow-up)
+        elif intent == Intent.BUDGET_SHOW_OPTIONS:
+            response = await self._handle_budget_meal_planning(context, show_options=True)
+            # Update conversation state: options shown, flow continues
+            self._update_conversation_state(
+                conv_state,
+                user_message=original_message,
+                assistant_response=response.content,
+                intent=Intent.BUDGET_SHOW_OPTIONS,
+                phase=InteractionPhase.EXPANDING_OPTIONS,
+                output_type="OPTIONS_LIST"
+            )
+            return response, AgentType.FRIDGE
 
         elif len(agent_bundle) == 1:
             # Single agent - emit status before and after processing
@@ -268,6 +523,15 @@ class DomusOrchestrator:
                     f"{agent_type.value} complete"
                 )
 
+                # Update conversation state for single-agent responses
+                self._update_conversation_state(
+                    conv_state,
+                    user_message=original_message,
+                    assistant_response=response.content,
+                    intent=intent,
+                    phase=InteractionPhase.FOLLOW_UP
+                )
+
                 return response, agent_type
 
         # Step 3: Fallback to general chat - emit status before fetching response
@@ -285,6 +549,14 @@ class DomusOrchestrator:
             AgentType.ORCHESTRATOR,
             AgentStatus.COMPLETED,
             "Response ready"
+        )
+
+        # Update conversation state for general chat
+        self._update_conversation_state(
+            conv_state,
+            user_message=original_message,
+            assistant_response=response.content,
+            phase=InteractionPhase.FOLLOW_UP
         )
 
         return response, None
@@ -657,29 +929,226 @@ class DomusOrchestrator:
         return None
 
     async def _handle_general_chat(self, context: AgentContext) -> AgentResponse:
-        """Handle general chat that doesn't need a specific agent"""
+        """
+        Handle general chat that doesn't need a specific agent.
+
+        SAFEGUARD: If we're mid-conversation, enrich the prompt with context
+        to prevent cold-start generic greetings.
+        """
         try:
+            conv_state = context.conversation_state
             system_prompt = SYSTEM_PROMPTS.get("orchestrator", "")
 
+            # Build the prompt with context if mid-conversation
+            prompt = context.message
+            enhanced_history = context.chat_history or []
+
+            if conv_state and conv_state.is_mid_conversation():
+                logger.info(f"General chat mid-conversation: phase={conv_state.interaction_phase}, "
+                           f"last_output={conv_state.last_structured_output_type}")
+
+                # Add context reminder to system prompt
+                context_reminder = f"""
+
+IMPORTANT CONTEXT:
+- You are continuing an existing conversation (turn {conv_state.turn_count + 1})
+- The last topic discussed was: {conv_state.active_intent or 'general conversation'}
+- Your last message was: "{(conv_state.last_assistant_message or '')[:200]}..."
+- The user just said: "{context.message}"
+
+Do NOT start with a generic greeting. Continue the conversation naturally.
+If the user seems to be responding to your previous message, acknowledge that context.
+"""
+                system_prompt = system_prompt + context_reminder
+
+                # Ensure last assistant message is in history
+                if conv_state.last_assistant_message and conv_state.last_user_message:
+                    # Check if already in history
+                    has_last_turn = any(
+                        msg.get("content") == conv_state.last_assistant_message
+                        for msg in enhanced_history
+                    )
+                    if not has_last_turn:
+                        # Prepend the last turn
+                        enhanced_history = [
+                            {"role": "assistant", "content": conv_state.last_assistant_message},
+                            {"role": "user", "content": conv_state.last_user_message}
+                        ] + enhanced_history[-4:]  # Keep last 4 + the prepended turn
+
             response = await self.llm.generate(
-                prompt=context.message,
+                prompt=prompt,
                 system_prompt=system_prompt,
-                chat_history=context.chat_history
+                chat_history=enhanced_history if enhanced_history else None
             )
 
+            # Post-process: Block obvious cold-start greetings mid-conversation
+            response_content = response.content
+            if conv_state and conv_state.turn_count > 0:
+                cold_start_phrases = [
+                    "hello! i'm domus",
+                    "hi! i'm domus",
+                    "hello! how can i help",
+                    "hi there! i'm your",
+                    "welcome! i'm domus"
+                ]
+                response_lower = response_content.lower()[:100]
+
+                if any(phrase in response_lower for phrase in cold_start_phrases):
+                    logger.warning("Blocked cold-start greeting mid-conversation, regenerating...")
+                    # Regenerate with stronger context
+                    retry_prompt = f"""Continue the conversation. The user said: "{context.message}"
+Your previous response was about: {conv_state.active_intent or 'helping the user'}.
+Do not introduce yourself again - just respond to what they said."""
+
+                    retry_response = await self.llm.generate(
+                        prompt=retry_prompt,
+                        system_prompt=system_prompt,
+                        chat_history=enhanced_history
+                    )
+                    response_content = retry_response.content
+
             return AgentResponse(
-                content=response.content,
+                content=response_content,
                 agent_type=AgentType.ORCHESTRATOR,
                 status=AgentStatus.COMPLETED,
-                metadata={"model": "gemini"}
+                metadata={"model": "gemini", "mid_conversation": conv_state.is_mid_conversation() if conv_state else False}
             )
 
         except Exception as e:
             logger.error(f"General chat error: {e}")
+            # Even fallback should check for mid-conversation
+            if context.conversation_state and context.conversation_state.turn_count > 0:
+                return AgentResponse(
+                    content="I'm sorry, I had trouble processing that. Could you rephrase your question?",
+                    agent_type=AgentType.ORCHESTRATOR,
+                    status=AgentStatus.COMPLETED
+                )
             return AgentResponse(
                 content="Hello! I'm Domus, your smart home assistant. How can I help you today?",
                 agent_type=AgentType.ORCHESTRATOR,
                 status=AgentStatus.COMPLETED
+            )
+
+    async def _handle_budget_meal_planning(
+        self,
+        context: AgentContext,
+        show_options: bool = False
+    ) -> AgentResponse:
+        """
+        Handle budget meal planning queries.
+
+        Feature 3: "Cheapest way to eat this week?"
+        - show_options=False: Initial query, returns short intro with "Show options?"
+        - show_options=True: Follow-up, returns full 3 options
+
+        IMPORTANT: Always includes chat history to maintain context across turns.
+        """
+        try:
+            conv_state = context.conversation_state
+            logger.info(f"Budget meal planning: show_options={show_options}, "
+                       f"has_conv_state={conv_state is not None}")
+
+            # Step 1: Emit status - analyzing fridge
+            await self._emit_status(
+                AgentType.FRIDGE,
+                AgentStatus.ACTIVATING,
+                "Checking your fridge..."
+            )
+
+            # Step 2: Get fridge contents using FridgeAgent
+            fridge_agent = self._agents.get(AgentType.FRIDGE)
+            if not fridge_agent:
+                raise ValueError("FridgeAgent not available")
+
+            # Get comprehensive fridge analysis
+            await self._emit_status(
+                AgentType.FRIDGE,
+                AgentStatus.PROCESSING,
+                "Analyzing fridge contents..."
+            )
+
+            fridge_response = await fridge_agent.process(context)
+            fridge_contents = fridge_response.content
+
+            await self._emit_status(
+                AgentType.FRIDGE,
+                AgentStatus.COMPLETED,
+                "Fridge analysis complete"
+            )
+
+            # Step 3: Use appropriate budget prompt
+            status_msg = "Creating budget meal options..." if show_options else "Preparing options..."
+            await self._emit_status(
+                AgentType.ORCHESTRATOR,
+                AgentStatus.PROCESSING,
+                status_msg
+            )
+
+            # Choose prompt based on whether we're showing options
+            prompt_key = "budget_meal_planning_options" if show_options else "budget_meal_planning"
+            budget_prompt = AGENT_PROMPTS.get(prompt_key, "")
+            if not budget_prompt:
+                raise ValueError(f"Budget prompt '{prompt_key}' not found")
+
+            # Format the prompt with fridge contents
+            formatted_prompt = budget_prompt.format(fridge_contents=fridge_contents)
+
+            # Build enhanced chat history with context
+            # This ensures Gemini always knows what was said before
+            enhanced_chat_history = []
+
+            # Include last assistant message if available (critical for follow-ups)
+            if conv_state and conv_state.last_assistant_message:
+                # For show_options, include what we offered previously
+                if show_options:
+                    enhanced_chat_history.append({
+                        "role": "assistant",
+                        "content": conv_state.last_assistant_message
+                    })
+                    enhanced_chat_history.append({
+                        "role": "user",
+                        "content": conv_state.last_user_message or context.message
+                    })
+                    logger.info("Including previous turn in chat history for context")
+
+            # Add any existing chat history
+            if context.chat_history:
+                # Limit to last 6 messages to avoid token overflow
+                recent_history = context.chat_history[-6:]
+                for msg in recent_history:
+                    if msg not in enhanced_chat_history:
+                        enhanced_chat_history.append(msg)
+
+            response = await self.llm.generate(
+                prompt=formatted_prompt,
+                system_prompt="You are a household budgeting assistant for Domus.",
+                chat_history=enhanced_chat_history if enhanced_chat_history else None,
+                temperature=0.5  # Balanced for structured output
+            )
+
+            logger.info("Budget meal planning response generated (show_options=%s, "
+                       f"history_len={len(enhanced_chat_history)})", show_options)
+
+            return AgentResponse(
+                content=response.content,
+                agent_type=AgentType.FRIDGE,
+                status=AgentStatus.COMPLETED,
+                metadata={
+                    "intent": "budget_show_options" if show_options else "budget_meal_planning",
+                    "fridge_analyzed": True,
+                    "options_shown": show_options,
+                    "context_turns": len(enhanced_chat_history)
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Budget meal planning error: {e}")
+            return AgentResponse(
+                content="I had trouble analyzing your fridge for budget meal options. "
+                        "Could you try asking again or check if Fridge Sense is connected?",
+                agent_type=AgentType.FRIDGE,
+                status=AgentStatus.ERROR,
+                metadata={"error": str(e)}
             )
 
     def get_agent_status(self, agent_type: AgentType) -> AgentStatus:
