@@ -45,6 +45,7 @@ interface OrderCard {
 export function ChatPage() {
   const [inputValue, setInputValue] = useState('');
   const [activatingAgent, setActivatingAgent] = useState<string | null>(null);
+  const [isThinking, setIsThinking] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [blinkStep, setBlinkStep] = useState<BlinkStep>('none');
   const [blinkEmail, setBlinkEmail] = useState('');
@@ -107,16 +108,17 @@ export function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, activatingAgent]);
 
-  // Clear activating agent when a domus response arrives
+  // Clear activating agent and thinking state when a domus response arrives
   useEffect(() => {
     const lastMessage = messages[messages.length - 1];
-    if (lastMessage && lastMessage.sender === 'domus' && activatingAgent) {
-      setActivatingAgent(null);
+    if (lastMessage && lastMessage.sender === 'domus') {
+      if (activatingAgent) setActivatingAgent(null);
+      if (isThinking) setIsThinking(false);
     }
-  }, [messages, activatingAgent]);
+  }, [messages, activatingAgent, isThinking]);
 
   const handleSend = () => {
-    if (!inputValue.trim() || isAgentActivating) return;
+    if (!inputValue.trim() || isAgentActivating || isThinking) return;
 
     const detectedAgent = detectAgent(inputValue);
 
@@ -128,7 +130,10 @@ export function ChatPage() {
       status: 'sending',
     });
 
-    // Show agent activation status
+    // Show thinking indicator
+    setIsThinking(true);
+
+    // Show agent activation status if specific agent detected
     if (detectedAgent) {
       setActivatingAgent(detectedAgent);
     }
@@ -639,8 +644,18 @@ export function ChatPage() {
                 )}
               </div>
             ))}
-            {activatingAgent && (
-              <p style={styles.agentActivating}>Activating {activatingAgent} agent...</p>
+            {/* Thinking indicator */}
+            {isThinking && (
+              <div style={styles.thinkingContainer}>
+                <div style={styles.thinkingDots}>
+                  <span className="thinking-dot">●</span>
+                  <span className="thinking-dot">●</span>
+                  <span className="thinking-dot">●</span>
+                </div>
+                <span style={styles.thinkingText}>
+                  {activatingAgent ? `${activatingAgent} is thinking...` : 'Thinking...'}
+                </span>
+              </div>
             )}
             {/* Order Cards */}
             {orderCards.map((card) => (
@@ -1035,6 +1050,28 @@ const styles: { [key: string]: React.CSSProperties } = {
     color: '#5E5D5D',
     margin: '8px 0',
     alignSelf: 'flex-start',
+  },
+  // Thinking indicator styles
+  thinkingContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '12px 16px',
+    backgroundColor: '#DAF7DA',
+    borderRadius: '16px',
+    alignSelf: 'flex-start',
+    maxWidth: '80%',
+  },
+  thinkingDots: {
+    display: 'flex',
+    gap: '3px',
+  },
+  thinkingText: {
+    fontFamily: '"Roboto", sans-serif',
+    fontSize: '14px',
+    fontWeight: 400,
+    color: '#5E5D5D',
+    fontStyle: 'italic',
   },
   bottomCard: {
     width: 'calc(100% - 32px)',
