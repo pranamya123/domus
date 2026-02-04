@@ -238,3 +238,69 @@ suggest optimal timing for pre and post-workout nutrition."""
         from datetime import timedelta
         meal_time = workout_time - timedelta(hours=2)
         return meal_time.strftime("%I:%M %p")
+
+    async def get_prep_context(
+        self,
+        user_id: str,
+        event_keyword: Optional[str] = None
+    ) -> Optional[dict]:
+        """
+        Get prep-required event context for cross-agent coordination.
+
+        Used by orchestrator to combine with fridge inventory for
+        "bake sale prep" and similar multi-agent queries.
+
+        Args:
+            user_id: User identifier
+            event_keyword: Optional keyword to find specific event (e.g., "bake sale")
+
+        Returns:
+            Event prep context dict or None if no matching events
+        """
+        if event_keyword:
+            # Find specific event by keyword
+            event = await self.calendar.get_event_by_keyword(user_id, event_keyword)
+            if event and event.get("requires_prep"):
+                return self._build_prep_context(event)
+            return None
+
+        # Get all upcoming prep-required events
+        prep_events = await self.calendar.get_prep_required_events(user_id, days_ahead=7)
+        if not prep_events:
+            return None
+
+        # Return the nearest prep event
+        next_prep_event = prep_events[0]
+        return self._build_prep_context(next_prep_event)
+
+    def _build_prep_context(self, event: dict) -> dict:
+        """Build prep context from event dictionary."""
+        start = datetime.fromisoformat(event["start_time"])
+        now = datetime.now()
+        hours_until = (start - now).total_seconds() / 3600
+        days_until = hours_until / 24
+
+        return {
+            "event_id": event["id"],
+            "event_title": event["title"],
+            "event_time": start.strftime("%A, %B %d at %I:%M %p"),
+            "event_datetime": event["start_time"],
+            "location": event.get("location", ""),
+            "description": event.get("description", ""),
+            "hours_until": round(hours_until, 1),
+            "days_until": round(days_until, 1),
+            "prep_type": event.get("prep_type", "cooking"),
+            "suggested_items": event.get("suggested_items", []),
+            "urgency": self._get_prep_urgency(hours_until),
+        }
+
+    def _get_prep_urgency(self, hours_until: float) -> str:
+        """Determine prep urgency based on time remaining."""
+        if hours_until < 12:
+            return "urgent"  # Less than 12 hours - need to prep now!
+        elif hours_until < 24:
+            return "soon"  # Less than 24 hours - prep today
+        elif hours_until < 48:
+            return "tomorrow"  # 1-2 days - can shop/prep tomorrow
+        else:
+            return "planning"  # More than 2 days - just planning

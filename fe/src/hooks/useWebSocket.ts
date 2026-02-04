@@ -17,6 +17,7 @@ import {
   isNotificationCreatedEvent,
   Notification,
 } from '../types';
+import { scheduleBakeSaleNotification } from './useCapacitor';
 
 const WS_URL = '/ws';
 const RECONNECT_DELAY = 3000;
@@ -139,6 +140,10 @@ export function useWebSocket() {
       console.log('[WS] Connected');
       setConnected(true);
       reconnectCountRef.current = 0;
+
+      // Schedule bake sale notification for 3 minutes from now
+      // This is Feature 2: "Bake Sale Prep, Handled"
+      scheduleBakeSaleNotification(3);
     };
   
     ws.onmessage = (event) => {

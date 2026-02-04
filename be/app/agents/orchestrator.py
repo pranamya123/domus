@@ -27,6 +27,7 @@ class Intent(str, Enum):
     NUTRITION_WITH_ACTIVITY = "nutrition_with_activity"  # meal + workout/schedule
     MEAL_PLANNING = "meal_planning"                      # meal + schedule
     SHOPPING_FOR_MEAL = "shopping_for_meal"              # meal + shopping
+    EVENT_PREP = "event_prep"                            # bake sale, dinner party prep
     FRIDGE_COMPREHENSIVE = "fridge_comprehensive"        # deep fridge analysis ("really")
     FRIDGE_ONLY = "fridge_only"                          # just fridge
     CALENDAR_ONLY = "calendar_only"                      # just calendar
@@ -39,6 +40,7 @@ INTENT_AGENT_BUNDLES: dict[Intent, list[AgentType]] = {
     Intent.NUTRITION_WITH_ACTIVITY: [AgentType.FRIDGE, AgentType.CALENDAR, AgentType.INSTACART],
     Intent.MEAL_PLANNING: [AgentType.FRIDGE, AgentType.CALENDAR],
     Intent.SHOPPING_FOR_MEAL: [AgentType.FRIDGE, AgentType.INSTACART],
+    Intent.EVENT_PREP: [AgentType.CALENDAR, AgentType.FRIDGE],  # Bake sale, dinner party prep
     Intent.FRIDGE_COMPREHENSIVE: [AgentType.FRIDGE],  # Deep analysis triggers comprehensive mode
     Intent.FRIDGE_ONLY: [AgentType.FRIDGE],
     Intent.CALENDAR_ONLY: [AgentType.CALENDAR],
@@ -62,7 +64,19 @@ INTENT_PATTERNS: dict[Intent, list[tuple[str, ...]]] = {
         ('need', 'cook'), ('buy', 'dinner'), ('shop', 'meal'),
         ('missing', 'recipe'), ('groceries', 'meal'),
     ],
+    Intent.EVENT_PREP: [
+        ('bake', 'sale'), ('bake', 'need'), ('bake', 'prep'),
+        ('dinner', 'party'), ('potluck',), ('hosting',),
+        ('need', 'bake'), ('prep', 'event'), ('prepare', 'event'),
+        ('ready', 'bake'), ('ready', 'party'),
+    ],
 }
+
+# Event prep keywords - trigger event prep intent
+EVENT_PREP_KEYWORDS = [
+    'bake sale', 'baking', 'dinner party', 'potluck', 'hosting',
+    'party prep', 'event prep', 'what do i need for',
+]
 
 
 class DomusOrchestrator:
@@ -115,6 +129,11 @@ class DomusOrchestrator:
         nutrition_keywords = ['meal', 'eat', 'food', 'snack', 'protein', 'carb', 'calorie', 'macro', 'nutrition']
         if any(kw in message_lower for kw in workout_keywords) and any(kw in message_lower for kw in nutrition_keywords):
             return Intent.NUTRITION_WITH_ACTIVITY
+
+        # Check for event prep queries (bake sale, dinner party, potluck)
+        if any(trigger in message_lower for trigger in EVENT_PREP_KEYWORDS):
+            logger.info("Detected event prep intent")
+            return Intent.EVENT_PREP
 
         # Check for comprehensive fridge queries ("really", "full scan", etc.)
         comprehensive_triggers = [
@@ -336,16 +355,33 @@ class DomusOrchestrator:
                 elif agent_type == AgentType.CALENDAR:
                     workout_ctx = await agent.get_workout_context(context.user_id)
                     events = await agent.calendar.get_today_events(context.user_id)
+
+                    # For EVENT_PREP intent, also get prep context
+                    prep_ctx = None
+                    if intent == Intent.EVENT_PREP:
+                        # Extract event keyword from message (e.g., "bake sale")
+                        event_keyword = self._extract_event_keyword(context.message)
+                        prep_ctx = await agent.get_prep_context(context.user_id, event_keyword)
+                        logger.info("Event prep context: %s", prep_ctx)
+
                     results["calendar"] = {
                         "workout": workout_ctx,
                         "events": events,
+                        "prep_context": prep_ctx,
                         "available": True
                     }
-                    workout_msg = "Found workout scheduled" if workout_ctx and workout_ctx.get("has_workout") else "No workout found"
+
+                    if prep_ctx:
+                        status_msg = f"Found event: {prep_ctx.get('event_title', 'Unknown')}"
+                    elif workout_ctx and workout_ctx.get("has_workout"):
+                        status_msg = "Found workout scheduled"
+                    else:
+                        status_msg = "No relevant events found"
+
                     await self._emit_status(
                         agent_type,
                         AgentStatus.COMPLETED,
-                        workout_msg
+                        status_msg
                     )
 
                 elif agent_type == AgentType.INSTACART:
@@ -429,12 +465,20 @@ class DomusOrchestrator:
         The LLM is given all agent results but instructed to only use
         sources that are relevant to the user's question.
         """
+        intent = results.get("intent", "")
+
         # Format each data source
         fridge_data = self._format_fridge_data(results.get("fridge", {}))
         calendar_data = self._format_calendar_data(results.get("calendar", {}))
         instacart_data = self._format_instacart_data(results.get("instacart", {}))
 
-        synthesis_prompt = f"""You are given data from multiple sources. Answer the user's question using ONLY the sources that are relevant.
+        # Use specialized prompt for EVENT_PREP
+        if intent == Intent.EVENT_PREP.value:
+            synthesis_prompt = self._get_event_prep_synthesis_prompt(
+                context.message, fridge_data, calendar_data, instacart_data
+            )
+        else:
+            synthesis_prompt = f"""You are given data from multiple sources. Answer the user's question using ONLY the sources that are relevant.
 
 **User Question:** {context.message}
 
@@ -468,6 +512,44 @@ class DomusOrchestrator:
 
         return response.content
 
+    def _get_event_prep_synthesis_prompt(
+        self,
+        user_question: str,
+        fridge_data: str,
+        calendar_data: str,
+        instacart_data: str
+    ) -> str:
+        """Get specialized synthesis prompt for event prep queries (bake sale, dinner party)."""
+        return f"""You are helping the user prepare for an upcoming event that requires cooking or baking.
+
+**User Question:** {user_question}
+
+---
+**EVENT DETAILS** (from calendar)
+{calendar_data}
+
+---
+**WHAT'S IN THE FRIDGE** (from camera vision analysis)
+{fridge_data}
+
+---
+**SHOPPING OPTIONS** (if available)
+{instacart_data}
+
+---
+
+**Your Task:**
+1. First, acknowledge the event and when it is
+2. Compare the "suggested items needed" from the event with what's visible in the fridge
+3. Create two clear lists:
+   - ✅ **Items you have:** (things from the suggested list that appear to be in the fridge)
+   - 🛒 **Items to get:** (things from the suggested list NOT visible in the fridge)
+4. If the event is baking-related, suggest 1-2 simple recipes that would work
+5. Note the urgency - if the event is tomorrow, emphasize what needs to happen today
+
+**Format:** Use clear headers and bullet points. Be encouraging and helpful!
+"""
+
     def _format_fridge_data(self, fridge: dict) -> str:
         """Format fridge data for synthesis prompt."""
         if not fridge.get("available"):
@@ -482,6 +564,27 @@ class DomusOrchestrator:
             return "Not available"
 
         lines = []
+
+        # Prep-required event info (takes priority)
+        prep_ctx = calendar.get("prep_context")
+        if prep_ctx:
+            lines.append(f"📅 **{prep_ctx.get('event_title', 'Event')}**")
+            lines.append(f"   When: {prep_ctx.get('event_time', 'Unknown')}")
+            lines.append(f"   Location: {prep_ctx.get('location', 'Unknown')}")
+            lines.append(f"   Time until event: {prep_ctx.get('days_until', 0):.1f} days ({prep_ctx.get('hours_until', 0):.0f} hours)")
+            lines.append(f"   Prep urgency: {prep_ctx.get('urgency', 'planning')}")
+            lines.append(f"   Prep type: {prep_ctx.get('prep_type', 'cooking')}")
+
+            suggested = prep_ctx.get("suggested_items", [])
+            if suggested:
+                lines.append(f"\n   **Suggested items needed:**")
+                for item in suggested:
+                    lines.append(f"   • {item}")
+
+            if prep_ctx.get("description"):
+                lines.append(f"\n   Note: {prep_ctx.get('description')}")
+
+            return "\n".join(lines)
 
         # Workout info
         workout = calendar.get("workout")
@@ -531,10 +634,27 @@ class DomusOrchestrator:
         common_items = [
             "chicken", "spinach", "eggs", "milk", "yogurt", "cheese",
             "lettuce", "tomato", "carrot", "broccoli", "salmon", "beef",
-            "rice", "pasta", "bread", "avocado", "banana", "apple"
+            "rice", "pasta", "bread", "avocado", "banana", "apple",
+            "flour", "sugar", "butter", "vanilla", "baking powder", "chocolate"
         ]
         response_lower = fridge_response.lower()
         return [item for item in common_items if item in response_lower]
+
+    def _extract_event_keyword(self, message: str) -> Optional[str]:
+        """Extract event keyword from user message for event lookup."""
+        message_lower = message.lower()
+
+        # Common event keywords to look for
+        event_keywords = [
+            "bake sale", "baking", "dinner party", "potluck",
+            "party", "hosting", "event"
+        ]
+
+        for keyword in event_keywords:
+            if keyword in message_lower:
+                return keyword
+
+        return None
 
     async def _handle_general_chat(self, context: AgentContext) -> AgentResponse:
         """Handle general chat that doesn't need a specific agent"""

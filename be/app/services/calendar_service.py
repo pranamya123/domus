@@ -21,7 +21,10 @@ class CalendarEvent:
     end_time: datetime
     location: Optional[str] = None
     description: Optional[str] = None
-    event_type: Optional[str] = None  # workout, meeting, meal, etc.
+    event_type: Optional[str] = None  # workout, meeting, meal, prep_required, etc.
+    requires_prep: bool = False  # True for events needing food preparation
+    prep_type: Optional[str] = None  # baking, cooking, shopping, etc.
+    suggested_items: Optional[list[str]] = None  # Suggested items to prepare
 
 
 class CalendarService:
@@ -84,6 +87,43 @@ class CalendarService:
                 end_time=(today + timedelta(days=1)).replace(hour=8, minute=0),
                 location="Zen Studio",
                 event_type="workout"
+            ),
+            # Prep-required events (bake sale, dinner party, potluck)
+            CalendarEvent(
+                id="evt_006",
+                title="School Bake Sale",
+                start_time=(today + timedelta(days=1)).replace(hour=14, minute=0),
+                end_time=(today + timedelta(days=1)).replace(hour=17, minute=0),
+                location="Lincoln Elementary School",
+                description="Bring baked goods for the school fundraiser",
+                event_type="prep_required",
+                requires_prep=True,
+                prep_type="baking",
+                suggested_items=["flour", "sugar", "butter", "eggs", "vanilla extract", "baking powder", "chocolate chips"]
+            ),
+            CalendarEvent(
+                id="evt_007",
+                title="Dinner Party at Home",
+                start_time=(today + timedelta(days=2)).replace(hour=19, minute=0),
+                end_time=(today + timedelta(days=2)).replace(hour=22, minute=0),
+                location="Home",
+                description="Hosting 6 guests for dinner",
+                event_type="prep_required",
+                requires_prep=True,
+                prep_type="cooking",
+                suggested_items=["chicken", "pasta", "garlic", "olive oil", "parmesan", "salad greens", "wine"]
+            ),
+            CalendarEvent(
+                id="evt_008",
+                title="Office Potluck",
+                start_time=(today + timedelta(days=3)).replace(hour=12, minute=0),
+                end_time=(today + timedelta(days=3)).replace(hour=14, minute=0),
+                location="Office Kitchen",
+                description="Monthly team potluck - bringing a main dish",
+                event_type="prep_required",
+                requires_prep=True,
+                prep_type="cooking",
+                suggested_items=["ground beef", "taco shells", "cheese", "lettuce", "tomatoes", "sour cream", "salsa"]
             ),
         ]
 
@@ -149,9 +189,72 @@ class CalendarService:
             return min(events, key=lambda e: e["start_time"])
         return None
 
+    async def get_prep_required_events(
+        self,
+        user_id: str,
+        days_ahead: int = 7
+    ) -> list[dict]:
+        """
+        Get upcoming events that require food preparation.
+
+        These are events like bake sales, dinner parties, potlucks
+        that need advance shopping and cooking.
+
+        Args:
+            user_id: User identifier
+            days_ahead: How many days ahead to look (default 7)
+
+        Returns:
+            List of prep-required events with suggested items
+        """
+        start = datetime.now()
+        end = start + timedelta(days=days_ahead)
+        events = self._get_mock_events(user_id)
+
+        # Filter to prep-required events within range
+        prep_events = [
+            e for e in events
+            if e.requires_prep and start <= e.start_time <= end
+        ]
+
+        logger.info(
+            "Prep-required events fetched (user=%s, days_ahead=%d, count=%d)",
+            user_id, days_ahead, len(prep_events)
+        )
+
+        return [self._event_to_dict(e) for e in sorted(prep_events, key=lambda e: e.start_time)]
+
+    async def get_event_by_keyword(
+        self,
+        user_id: str,
+        keyword: str,
+        days_ahead: int = 7
+    ) -> Optional[dict]:
+        """
+        Find an event by keyword in the title.
+
+        Args:
+            user_id: User identifier
+            keyword: Keyword to search for (case-insensitive)
+            days_ahead: How many days ahead to look
+
+        Returns:
+            First matching event or None
+        """
+        start = datetime.now()
+        end = start + timedelta(days=days_ahead)
+        events = self._get_mock_events(user_id)
+
+        keyword_lower = keyword.lower()
+        for event in events:
+            if keyword_lower in event.title.lower() and start <= event.start_time <= end:
+                return self._event_to_dict(event)
+
+        return None
+
     def _event_to_dict(self, event: CalendarEvent) -> dict:
         """Convert CalendarEvent to dictionary."""
-        return {
+        result = {
             "id": event.id,
             "title": event.title,
             "start_time": event.start_time.isoformat(),
@@ -159,7 +262,13 @@ class CalendarService:
             "location": event.location,
             "description": event.description,
             "event_type": event.event_type,
+            "requires_prep": event.requires_prep,
         }
+        # Add prep-specific fields if applicable
+        if event.requires_prep:
+            result["prep_type"] = event.prep_type
+            result["suggested_items"] = event.suggested_items or []
+        return result
 
 
 # Singleton instance

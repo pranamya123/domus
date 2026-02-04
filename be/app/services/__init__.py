@@ -7,6 +7,7 @@ from .calendar_service import CalendarService, get_calendar_service
 from .instacart_service import InstacartService, get_instacart_service
 from .fridge_inventory_service import FridgeInventoryService
 from .push_notification_service import PushNotificationService, get_push_notification_service
+from .bake_sale_notification_service import BakeSaleNotificationService
 
 __all__ = [
     'BlinkService',
@@ -18,4 +19,5 @@ __all__ = [
     'FridgeInventoryService',
     'PushNotificationService',
     'get_push_notification_service',
+    'BakeSaleNotificationService',
 ]

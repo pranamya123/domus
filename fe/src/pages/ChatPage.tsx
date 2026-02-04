@@ -8,7 +8,6 @@ import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useApi } from '../hooks/useApi';
-import { sendLocalNotification } from '../hooks/useCapacitor';
 import { AgentType, AgentStatus, Notification } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : 'http://localhost:8000/api';
@@ -67,9 +66,25 @@ export function ChatPage() {
   const notificationPanelOpen = useStore((state) => state.notificationPanelOpen);
   const setNotificationPanelOpen = useStore((state) => state.setNotificationPanelOpen);
   const addNotification = useStore((state) => state.addNotification);
+  const pendingOrderCard = useStore((state) => state.pendingOrderCard);
+  const setPendingOrderCard = useStore((state) => state.setPendingOrderCard);
 
   const { isConnected, sendMessage } = useWebSocket();
-  const { blinkLogin, blinkVerify, token, fetchNotifications, resolveNotificationToChat, createTestNotification } = useApi();
+  const { blinkLogin, blinkVerify, token, fetchNotifications, resolveNotificationToChat } = useApi();
+
+  // Handle pending order card from iOS notification tap (set by App.tsx)
+  useEffect(() => {
+    if (pendingOrderCard) {
+      console.log('[ChatPage] Processing pending order card:', pendingOrderCard);
+      setOrderCards(prev => [...prev, {
+        id: pendingOrderCard.id,
+        items: pendingOrderCard.items,
+        status: 'pending',
+      }]);
+      // Clear the pending order card
+      setPendingOrderCard(null);
+    }
+  }, [pendingOrderCard, setPendingOrderCard]);
 
   // Fetch notifications on mount
   useEffect(() => {
@@ -540,50 +555,14 @@ export function ChatPage() {
           <div style={styles.notificationPanel}>
             <div style={styles.notificationHeader}>
               <span style={styles.notificationTitle}>Notifications</span>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <button
-                  style={styles.testNotificationBtn}
-                  onClick={async () => {
-                    console.log('[Test] Creating test notification...');
-                    try {
-                      const result = await createTestNotification();
-                      console.log('[Test] Created:', result);
-                      // Add directly to store with descriptive title for panel
-                      addNotification({
-                        notification_id: result.notification_id,
-                        title: result.title, // Keep descriptive title for panel
-                        body: result.body,
-                        sent_at: new Date().toISOString(),
-                        read_at: null,
-                        notification_type: 'proactive',
-                        chat_seed_content: `${result.title}\n\n${result.body}`,
-                        event_id: null,
-                      });
-                      console.log('[Test] Added to store');
-
-                      // Send local notification with "domus" title (per mockup)
-                      await sendLocalNotification(
-                        'domus',
-                        'Missing items for the Bake Sale tomorrow, order now',
-                        result.notification_id
-                      );
-                      console.log('[Test] Local notification sent');
-                    } catch (err) {
-                      console.error('[Test] Error:', err);
-                    }
-                  }}
-                >
-                  Test
-                </button>
-                <button
-                  style={styles.notificationCloseBtn}
-                  onClick={() => setNotificationPanelOpen(false)}
-                >
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                    <path d="M1 1L11 11M1 11L11 1" stroke="#000" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
-                </button>
-              </div>
+              <button
+                style={styles.notificationCloseBtn}
+                onClick={() => setNotificationPanelOpen(false)}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M1 1L11 11M1 11L11 1" stroke="#000" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </button>
             </div>
             <div style={styles.notificationList}>
               {notifications.length === 0 ? (
@@ -1219,17 +1198,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontFamily: '"Roboto", sans-serif',
     fontSize: '10px',
     color: '#A1A1A1',
-  },
-  testNotificationBtn: {
-    fontFamily: '"Roboto", sans-serif',
-    fontSize: '11px',
-    fontWeight: 500,
-    color: '#077507',
-    backgroundColor: '#E8F5E9',
-    border: '1px solid #C7D4C7',
-    borderRadius: '4px',
-    padding: '4px 8px',
-    cursor: 'pointer',
   },
   // Order Card styles
   orderCard: {

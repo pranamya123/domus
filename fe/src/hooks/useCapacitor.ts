@@ -14,7 +14,6 @@ import { PushNotifications, Token, PushNotificationSchema, ActionPerformed } fro
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { App, URLOpenListenerEvent } from '@capacitor/app';
 import { useStore } from '../store/useStore';
-import { useApi } from './useApi';
 
 // === DEMO: Log device token for testing ===
 // In production, you'd send this to your backend
@@ -76,6 +75,7 @@ export async function sendLocalNotification(
 
 // ID for the scheduled background notification (so we can cancel it)
 const BACKGROUND_NOTIFICATION_ID = 999999;
+const BAKE_SALE_NOTIFICATION_ID = 888888;
 
 /**
  * Schedule a notification to fire X minutes after app is backgrounded
@@ -120,6 +120,67 @@ export async function scheduleBackgroundNotification(delayMinutes: number = 3): 
 }
 
 /**
+ * Schedule the bake sale notification to fire X minutes after app open
+ * This is Feature 2: "Bake Sale Prep, Handled"
+ */
+export async function scheduleBakeSaleNotification(delayMinutes: number = 3): Promise<void> {
+  if (!Capacitor.isNativePlatform()) {
+    console.log('[LocalNotification] Not native platform, skipping bake sale notification');
+    return;
+  }
+
+  try {
+    // Cancel any existing bake sale notification
+    await LocalNotifications.cancel({ notifications: [{ id: BAKE_SALE_NOTIFICATION_ID }] });
+
+    // Request permission if not already granted
+    const permStatus = await LocalNotifications.checkPermissions();
+    if (permStatus.display !== 'granted') {
+      console.warn('[LocalNotification] Permission not granted for bake sale notification');
+      return;
+    }
+
+    const delayMs = delayMinutes * 60 * 1000;
+    const fireAt = new Date(Date.now() + delayMs);
+
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id: BAKE_SALE_NOTIFICATION_ID,
+          title: 'Bake Sale tomorrow',
+          body: "You're missing a few items. Tap to see what you need.",
+          schedule: { at: fireAt },
+          sound: 'default',
+          extra: {
+            type: 'BAKE_SALE',
+          },
+        },
+      ],
+    });
+
+    console.log('[LocalNotification] Bake sale notification scheduled for:', fireAt.toLocaleTimeString());
+  } catch (err) {
+    console.error('[LocalNotification] Failed to schedule bake sale notification:', err);
+  }
+}
+
+/**
+ * Cancel the bake sale notification
+ */
+export async function cancelBakeSaleNotification(): Promise<void> {
+  if (!Capacitor.isNativePlatform()) {
+    return;
+  }
+
+  try {
+    await LocalNotifications.cancel({ notifications: [{ id: BAKE_SALE_NOTIFICATION_ID }] });
+    console.log('[LocalNotification] Bake sale notification cancelled');
+  } catch (err) {
+    console.error('[LocalNotification] Failed to cancel bake sale notification:', err);
+  }
+}
+
+/**
  * Cancel the scheduled background notification (when app comes to foreground)
  */
 export async function cancelBackgroundNotification(): Promise<void> {
@@ -135,14 +196,25 @@ export async function cancelBackgroundNotification(): Promise<void> {
   }
 }
 
+// Notification data passed to the callback when iOS notification is tapped
+export interface NotificationTapData {
+  notification_id: string;
+  notification_type: string;
+  title: string;
+  body: string;
+  chat_seed_content: string;
+}
+
 interface UseCapacitorOptions {
-  onNotificationTap?: (notificationId: string) => void;
+  onNotificationTap?: (notification: NotificationTapData) => void;
 }
 
 export function useCapacitor(options: UseCapacitorOptions = {}) {
   const { onNotificationTap } = options;
   const addMessage = useStore((state) => state.addMessage);
-  const { resolveNotificationToChat } = useApi();
+  // Note: We don't use resolveNotificationToChat from useApi() here because
+  // the hook's closure captures a potentially stale token. Instead, we make
+  // direct fetch calls with fresh token from localStorage.
   const hasInitialized = useRef(false);
 
   /**
@@ -152,10 +224,26 @@ export function useCapacitor(options: UseCapacitorOptions = {}) {
    * - Marks notification as read
    */
   const handleNotificationId = useCallback(async (notificationId: string) => {
-    console.log('[Capacitor] Handling notification_id:', notificationId);
+    console.log('[Capacitor] Handling notification_id (fallback):', notificationId);
 
     try {
-      const result = await resolveNotificationToChat(notificationId);
+      // Use fresh token from localStorage (not closure-captured hook)
+      const freshToken = localStorage.getItem('domus_token');
+      const apiUrl = import.meta.env.VITE_API_URL || '';
+
+      const resolveResponse = await fetch(
+        `${apiUrl}/api/notifications/${notificationId}/resolve`,
+        {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${freshToken}` },
+        }
+      );
+
+      if (!resolveResponse.ok) {
+        throw new Error(`Resolve failed: ${resolveResponse.status}`);
+      }
+
+      const result = await resolveResponse.json();
 
       // Insert the chat seed content as assistant message
       addMessage({
@@ -166,14 +254,15 @@ export function useCapacitor(options: UseCapacitorOptions = {}) {
         fromNotification: true,
       });
 
-      // Call optional callback
-      onNotificationTap?.(notificationId);
+      // Note: onNotificationTap is NOT called here because this is the fallback path
+      // that doesn't have full notification data. The preferred path (in tap handlers)
+      // fetches full notification data and calls the callback directly.
 
-      console.log('[Capacitor] Notification resolved, message added to chat');
+      console.log('[Capacitor] Notification resolved via fallback, message added to chat');
     } catch (err) {
       console.error('[Capacitor] Failed to resolve notification:', err);
     }
-  }, [resolveNotificationToChat, addMessage, onNotificationTap]);
+  }, [addMessage]);
 
   /**
    * Parse notification_id from URL
@@ -210,11 +299,135 @@ export function useCapacitor(options: UseCapacitorOptions = {}) {
       }
 
       // Listen for local notification taps
-      LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+      LocalNotifications.addListener('localNotificationActionPerformed', async (action) => {
         console.log('[Capacitor] Local notification tapped:', action);
 
-        const notificationId = action.notification.extra?.notification_id;
+        const extra = action.notification.extra;
+
+        // Handle BAKE_SALE type - fetch latest bake sale notification from backend
+        if (extra?.type === 'BAKE_SALE') {
+          console.log('[Capacitor] Bake sale notification tapped, fetching latest...');
+          let bakeSaleNotifId: string | null = null;
+
+          try {
+            // Always get fresh token from localStorage (not from React hook closure)
+            const freshToken = localStorage.getItem('domus_token');
+            const apiUrl = import.meta.env.VITE_API_URL || '';
+
+            // Fetch notifications
+            const response = await fetch(`${apiUrl}/api/notifications?limit=10`, {
+              headers: { 'Authorization': `Bearer ${freshToken}` },
+            });
+            if (response.ok) {
+              const data = await response.json();
+              // Find the latest bake sale notification
+              const bakeSaleNotif = data.notifications?.find(
+                (n: { notification_type: string; title: string }) =>
+                  n.notification_type === 'proactive' &&
+                  n.title.toLowerCase().includes('bake')
+              );
+              if (bakeSaleNotif) {
+                bakeSaleNotifId = bakeSaleNotif.notification_id;
+
+                // Resolve the notification using direct fetch (not closure-captured hook)
+                const resolveResponse = await fetch(
+                  `${apiUrl}/api/notifications/${bakeSaleNotif.notification_id}/resolve`,
+                  {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${freshToken}` },
+                  }
+                );
+
+                if (resolveResponse.ok) {
+                  const resolved = await resolveResponse.json();
+
+                  // Call onNotificationTap callback with full notification data
+                  if (onNotificationTap) {
+                    onNotificationTap({
+                      notification_id: bakeSaleNotif.notification_id,
+                      notification_type: bakeSaleNotif.notification_type,
+                      title: bakeSaleNotif.title,
+                      body: bakeSaleNotif.body,
+                      chat_seed_content: resolved.chat_seed_content,
+                    });
+                    console.log('[Capacitor] Bake sale notification handled via callback');
+                    return;
+                  } else {
+                    // No callback - add message directly
+                    addMessage({
+                      id: `notif-${bakeSaleNotif.notification_id}`,
+                      content: resolved.chat_seed_content,
+                      sender: 'domus',
+                      timestamp: new Date().toISOString(),
+                      fromNotification: true,
+                    });
+                    console.log('[Capacitor] Bake sale notification handled (no callback)');
+                    return;
+                  }
+                } else {
+                  console.error('[Capacitor] Resolve failed:', resolveResponse.status);
+                }
+              }
+            }
+          } catch (err) {
+            console.error('[Capacitor] Failed to handle bake sale notification:', err);
+          }
+
+          // Fallback: if we have the notification ID but resolve failed, try handleNotificationId
+          if (bakeSaleNotifId) {
+            console.log('[Capacitor] Using fallback handleNotificationId for bake sale:', bakeSaleNotifId);
+            handleNotificationId(bakeSaleNotifId);
+            return;
+          }
+        }
+
+        // Default: use notification_id from extra
+        const notificationId = extra?.notification_id;
         if (notificationId) {
+          // For regular notifications, also try to use onNotificationTap callback
+          if (onNotificationTap) {
+            try {
+              // Always get fresh token from localStorage
+              const freshToken = localStorage.getItem('domus_token');
+              const apiUrl = import.meta.env.VITE_API_URL || '';
+
+              // Fetch full notification data
+              const response = await fetch(`${apiUrl}/api/notifications?limit=20`, {
+                headers: { 'Authorization': `Bearer ${freshToken}` },
+              });
+              if (response.ok) {
+                const data = await response.json();
+                const notification = data.notifications?.find(
+                  (n: { notification_id: string }) => n.notification_id === notificationId
+                );
+                if (notification) {
+                  // Resolve using direct fetch (not closure-captured hook)
+                  const resolveResponse = await fetch(
+                    `${apiUrl}/api/notifications/${notificationId}/resolve`,
+                    {
+                      method: 'POST',
+                      headers: { 'Authorization': `Bearer ${freshToken}` },
+                    }
+                  );
+                  if (resolveResponse.ok) {
+                    const resolved = await resolveResponse.json();
+                    onNotificationTap({
+                      notification_id: notification.notification_id,
+                      notification_type: notification.notification_type,
+                      title: notification.title,
+                      body: notification.body,
+                      chat_seed_content: resolved.chat_seed_content,
+                    });
+                    console.log('[Capacitor] Regular notification handled via callback');
+                    return;
+                  }
+                }
+              }
+            } catch (err) {
+              console.error('[Capacitor] Failed to fetch notification for callback:', err);
+            }
+          }
+          // Fallback to basic handling
           handleNotificationId(notificationId);
         }
       });

@@ -34,6 +34,9 @@ from ..services.blink_service import get_blink_service
 
 logger = logging.getLogger(__name__)
 
+# TODO: Change trigger to 2 days before the calendar event instead of 3 minutes after app open.
+BAKE_SALE_NOTIFICATION_DELAY_SECONDS = 180  # 3 minutes after app open
+
 
 class WebSocketManager:
     """Manages WebSocket connections and event broadcasting."""
@@ -42,6 +45,8 @@ class WebSocketManager:
         self._storage = storage
         self._connections: dict[str, WebSocket] = {}  # user_id -> websocket
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+        self._bake_sale_tasks: dict[str, asyncio.Task] = {}  # Track bake sale notification tasks
+        self._bake_sale_notified: set[str] = set()  # Track users already notified (idempotency)
 
     async def connect(
         self,
@@ -66,6 +71,16 @@ class WebSocketManager:
         # Start event subscription task
         asyncio.create_task(self._event_subscription_loop(user_id, websocket))
 
+        # Send any pending unread notifications (for when user was backgrounded)
+        await self._send_pending_notifications(user_id)
+
+        # Schedule delayed bake sale notification check (3 minutes after connect)
+        # TODO: Change trigger to 2 days before the calendar event instead of 3 minutes after app open.
+        if user_id not in self._bake_sale_notified:
+            self._bake_sale_tasks[user_id] = asyncio.create_task(
+                self._delayed_bake_sale_check(user_id, session)
+            )
+
     async def disconnect(self, user_id: str) -> None:
         """Clean up on disconnect."""
         # Cancel heartbeat
@@ -73,11 +88,142 @@ class WebSocketManager:
             self._heartbeat_tasks[user_id].cancel()
             del self._heartbeat_tasks[user_id]
 
+        # NOTE: Do NOT cancel bake sale task - it should still fire even if user backgrounds app
+        # The notification will be delivered via push/local notification
+
         # Remove connection
         if user_id in self._connections:
             del self._connections[user_id]
 
         logger.info(f"WebSocket disconnected: user={user_id}")
+
+    async def _send_pending_notifications(self, user_id: str) -> None:
+        """
+        Send any unread notifications to user on reconnect.
+
+        This ensures notifications created while user was backgrounded
+        are delivered when they return to the app.
+        """
+        try:
+            notifications = await self._storage.state.get_notifications(user_id, limit=10)
+            unread = [n for n in notifications if n.read_at is None]
+
+            if not unread:
+                return
+
+            logger.info("Sending %d pending notifications to user %s", len(unread), user_id)
+
+            for notification in unread:
+                event = DomusEvent(
+                    type=EventType.NOTIFICATION_CREATED,
+                    payload={
+                        "notification_id": str(notification.notification_id),
+                        "title": notification.title,
+                        "body": notification.body,
+                        "notification_type": notification.notification_type,
+                        "event_id": notification.event_id,
+                    }
+                )
+                await self.send_event(user_id, event)
+
+        except Exception as e:
+            logger.error("Failed to send pending notifications: %s", e)
+
+    async def _delayed_bake_sale_check(
+        self,
+        user_id: str,
+        session: UserSession
+    ) -> None:
+        """
+        Check for bake sale events after a delay and send notification if needed.
+
+        This is the trigger for Feature 2: "Bake Sale Prep, Handled"
+        Fires 3 minutes after app open (WebSocket connect).
+
+        TODO: Change trigger to 2 days before the calendar event instead of 3 minutes after app open.
+        """
+        try:
+            logger.info(
+                "Bake sale timer started for user %s (delay=%ds)",
+                user_id, BAKE_SALE_NOTIFICATION_DELAY_SECONDS
+            )
+
+            # Wait for configured delay
+            await asyncio.sleep(BAKE_SALE_NOTIFICATION_DELAY_SECONDS)
+
+            logger.info("Bake sale timer fired for user %s", user_id)
+
+            # NOTE: Don't check if still connected - notification should be sent
+            # even if app is backgrounded. Push/local notification will still work.
+
+            # Check idempotency - only notify once per session
+            if user_id in self._bake_sale_notified:
+                logger.debug("User %s already notified about bake sale", user_id)
+                return
+
+            logger.info("Running bake sale check for user %s", user_id)
+
+            # Import here to avoid circular imports
+            from ..services.calendar_service import get_calendar_service
+            from ..services.bake_sale_notification_service import BakeSaleNotificationService
+
+            # Check for upcoming bake sale events
+            calendar = get_calendar_service()
+            prep_events = await calendar.get_prep_required_events(user_id, days_ahead=7)
+
+            # Find bake sale type events
+            bake_sale_event = None
+            for event in prep_events:
+                title_lower = event.get("title", "").lower()
+                if "bake" in title_lower or event.get("prep_type") == "baking":
+                    bake_sale_event = event
+                    break
+
+            if not bake_sale_event:
+                logger.debug("No bake sale events found for user %s", user_id)
+                return
+
+            # Generate and send rich notification
+            notification_service = BakeSaleNotificationService(self._storage)
+            notification = await notification_service.create_bake_sale_notification(
+                user_id=user_id,
+                event=bake_sale_event
+            )
+
+            if notification:
+                # Mark as notified (idempotency)
+                self._bake_sale_notified.add(user_id)
+
+                # Try to send WebSocket event for real-time UI update
+                # If user is disconnected, notification is still saved to storage
+                # and will be delivered when they reconnect via _send_pending_notifications
+                if user_id in self._connections:
+                    notification_event = DomusEvent(
+                        type=EventType.NOTIFICATION_CREATED,
+                        payload={
+                            "notification_id": notification["notification_id"],
+                            "title": notification["title"],
+                            "body": notification["body"],
+                            "notification_type": "proactive",
+                            "event_id": bake_sale_event.get("id"),
+                            "has_action_card": True,
+                        }
+                    )
+                    await self.broadcast_to_user(user_id, notification_event)
+                    logger.info(
+                        "Bake sale in-app notification sent (realtime) for user %s",
+                        user_id
+                    )
+                else:
+                    logger.info(
+                        "Bake sale notification saved for user %s (will deliver on reconnect)",
+                        user_id
+                    )
+
+        except asyncio.CancelledError:
+            logger.debug("Bake sale check cancelled for user %s", user_id)
+        except Exception as e:
+            logger.error("Bake sale check error for user %s: %s", user_id, e)
 
     async def send_event(self, user_id: str, event: DomusEvent) -> bool:
         """

@@ -62,6 +62,10 @@ interface AppState {
   setUnreadCount: (count: number) => void;
   markNotificationRead: (notificationId: string) => void;
   setNotificationPanelOpen: (open: boolean) => void;
+
+  // Pending order card from iOS notification tap
+  pendingOrderCard: { id: string; items: string[] } | null;
+  setPendingOrderCard: (card: { id: string; items: string[] } | null) => void;
 }
 
 const initialAgentStatus: Record<AgentType, AgentStatus> = {
@@ -92,6 +96,7 @@ export const useStore = create<AppState>((set) => ({
   notifications: [],
   unreadCount: 0,
   notificationPanelOpen: false,
+  pendingOrderCard: null,
   capabilities: initialCapabilities,
   isConnected: false,
   isLoading: false,
@@ -184,4 +189,6 @@ export const useStore = create<AppState>((set) => ({
     })),
 
   setNotificationPanelOpen: (open) => set({ notificationPanelOpen: open }),
+
+  setPendingOrderCard: (card) => set({ pendingOrderCard: card }),
 }));

@@ -8,7 +8,7 @@
 import { useEffect, useCallback } from 'react';
 import { useStore } from './store/useStore';
 import { useApi } from './hooks/useApi';
-import { useCapacitor, getDeviceToken } from './hooks/useCapacitor';
+import { useCapacitor, getDeviceToken, NotificationTapData } from './hooks/useCapacitor';
 import { ScreenType } from './types';
 
 // Pages
@@ -24,6 +24,8 @@ function App() {
   const token = useStore((state) => state.token);
   const logout = useStore((state) => state.logout);
   const setScreen = useStore((state) => state.setScreen);
+  const addMessage = useStore((state) => state.addMessage);
+  const setPendingOrderCard = useStore((state) => state.setPendingOrderCard);
   const { fetchCurrentUser, registerDeviceToken } = useApi();
 
   // Clear session on app startup - require fresh login every time
@@ -41,11 +43,41 @@ function App() {
     });
   }, [currentScreen, isAuthenticated, token]);
 
-  // Handle notification tap - navigate to chat
-  const handleNotificationTap = useCallback((notificationId: string) => {
-    console.log('[App] Notification tapped:', notificationId);
+  // Handle notification tap - add message to chat, show order card, navigate
+  const handleNotificationTap = useCallback((notification: NotificationTapData) => {
+    console.log('[App] Notification tapped:', notification.notification_id, notification);
+
+    // 1. Add the chat seed content as an assistant message
+    addMessage({
+      id: `notif-${notification.notification_id}`,
+      content: notification.chat_seed_content,
+      sender: 'domus',
+      timestamp: new Date().toISOString(),
+      fromNotification: true,
+    });
+
+    // 2. For proactive notifications with missing items, set pending order card
+    if (notification.notification_type === 'proactive') {
+      // Extract items from notification body (e.g., "missing: flour, sugar, vanilla")
+      const bodyLower = notification.body.toLowerCase();
+      const missingMatch = bodyLower.match(/missing[:\s]+([^.]+)/);
+      if (missingMatch) {
+        const items = missingMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+        if (items.length > 0) {
+          setPendingOrderCard({
+            id: notification.notification_id,
+            items,
+          });
+          console.log('[App] Set pending order card:', items);
+        }
+      }
+    }
+
+    // 3. Navigate to chat screen
     setScreen(ScreenType.CHAT);
-  }, [setScreen]);
+
+    console.log('[App] Notification handled - message added, navigating to chat');
+  }, [addMessage, setPendingOrderCard, setScreen]);
 
   // Initialize Capacitor for iOS push notifications and deep links
   const { isNative, platform } = useCapacitor({
