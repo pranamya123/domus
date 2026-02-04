@@ -31,6 +31,33 @@ FRIDGE_IMAGE_SCOPE = (
     "Ignore refrigerator hardware and non-food items."
 )
 
+# Comprehensive analysis prompt for "What's in my fridge, really?" queries
+COMPREHENSIVE_FRIDGE_ANALYSIS_PROMPT = """Analyze this fridge image thoroughly. Think step-by-step and provide a comprehensive summary.
+
+## STEP 1: INVENTORY
+List everything you can see. For each item note:
+- Name and approximate quantity
+- Location in fridge (shelf, drawer, door)
+
+## STEP 2: FRESHNESS ASSESSMENT
+For perishables, estimate condition:
+- 🟢 Fresh (good for 5+ days)
+- 🟡 Use soon (1-4 days)
+- 🔴 Use immediately or discard
+
+## STEP 3: MEAL POTENTIAL
+Based on what's available, suggest:
+- 2-3 meals you could make right now
+- Key ingredients you have for each
+
+## STEP 4: SHOPPING GAPS
+What common staples are missing or running low?
+- Proteins
+- Produce
+- Dairy basics
+
+Format your response with clear headers. Be specific about what you actually see - don't invent items."""
+
 
 # Keywords that indicate fridge-related queries
 FRIDGE_KEYWORDS = [
@@ -284,10 +311,95 @@ class FridgeAgent(BaseAgent):
 
         logger.info("Closed vision chat session for user %s", user_id)
 
+    async def get_comprehensive_summary(self, user_id: str) -> Optional[str]:
+        """
+        Get a comprehensive fridge analysis using high-thinking Gemini prompt.
+
+        This provides a thorough breakdown of:
+        1. Full inventory with quantities and locations
+        2. Freshness assessment with urgency indicators
+        3. Meal suggestions based on available ingredients
+        4. Shopping gaps and missing staples
+
+        Returns None if vision chat is unavailable.
+        """
+        if not self._api_key:
+            logger.warning("No Gemini API key - comprehensive summary unavailable")
+            return None
+
+        thumbnail_path = self._get_thumbnail_path()
+        if not thumbnail_path.exists():
+            logger.warning("No thumbnail available for comprehensive summary")
+            return None
+
+        try:
+            # Upload fresh image for analysis (don't reuse chat session)
+            logger.info("Starting comprehensive fridge analysis for user %s", user_id)
+            uploaded_file = genai.upload_file(
+                path=str(thumbnail_path),
+                mime_type="image/jpeg"
+            )
+
+            # Use higher temperature for more creative analysis
+            model = genai.GenerativeModel(
+                model_name=self._vision_model,
+                generation_config={
+                    "temperature": 0.6,
+                    "top_p": 0.95,
+                    "top_k": 40,
+                    "max_output_tokens": 4096,  # Allow longer response
+                }
+            )
+
+            # Send comprehensive analysis prompt
+            response = model.generate_content([
+                uploaded_file,
+                COMPREHENSIVE_FRIDGE_ANALYSIS_PROMPT
+            ])
+
+            # Cleanup uploaded file
+            try:
+                genai.delete_file(uploaded_file.name)
+            except Exception as e:
+                logger.warning("Failed to delete temp uploaded file: %s", e)
+
+            logger.info("Comprehensive fridge analysis complete for user %s", user_id)
+            return response.text
+
+        except Exception as e:
+            logger.error("Comprehensive fridge analysis failed: %s", e)
+            return None
+
     def can_handle(self, message: str) -> bool:
         """Check if message is fridge-related"""
         message_lower = message.lower()
         return any(keyword in message_lower for keyword in FRIDGE_KEYWORDS)
+
+    def is_comprehensive_query(self, message: str) -> bool:
+        """
+        Check if message is asking for a comprehensive fridge analysis.
+
+        Triggers on phrases like:
+        - "what's in my fridge, really?"
+        - "really what's in my fridge"
+        - "full fridge scan"
+        - "complete fridge analysis"
+        - "deep fridge check"
+        """
+        message_lower = message.lower()
+        comprehensive_triggers = [
+            "really",
+            "full scan",
+            "full fridge",
+            "complete analysis",
+            "comprehensive",
+            "deep check",
+            "thorough",
+            "everything in my fridge",
+            "detailed",
+            "tell me everything",
+        ]
+        return any(trigger in message_lower for trigger in comprehensive_triggers)
 
     async def process(self, context: AgentContext) -> AgentResponse:
         """
@@ -295,9 +407,10 @@ class FridgeAgent(BaseAgent):
 
         Flow:
         1. Check if thumbnail exists in storage
-        2. Initialize/refresh Gemini vision chat with thumbnail image
-        3. Forward user question to vision chat
-        4. Post-process and return response
+        2. Check if this is a "comprehensive" query (e.g., "really")
+        3. Initialize/refresh Gemini vision chat with thumbnail image
+        4. Forward user question to vision chat
+        5. Post-process and return response
 
         Args:
             context: Agent context with message and state
@@ -329,6 +442,27 @@ Once available, I can analyze your fridge contents and help you with:
                     status=AgentStatus.COMPLETED,
                     metadata={"requires_thumbnail": True}
                 )
+
+            # Check if this is a comprehensive "really" query
+            if self.is_comprehensive_query(context.message):
+                logger.info("Comprehensive fridge query detected for user %s", context.user_id)
+                comprehensive_response = await self.get_comprehensive_summary(context.user_id)
+
+                if comprehensive_response:
+                    self.status = AgentStatus.COMPLETED
+                    return AgentResponse(
+                        content=comprehensive_response,
+                        agent_type=self.agent_type,
+                        status=self.status,
+                        metadata={
+                            "model": self._vision_model,
+                            "vision_enabled": True,
+                            "comprehensive": True,
+                            "finish_reason": "stop"
+                        }
+                    )
+                else:
+                    logger.warning("Comprehensive analysis failed, falling back to regular vision chat")
 
             # Initialize or refresh vision chat with thumbnail
             vision_ready = await self._ensure_vision_chat(context.user_id)

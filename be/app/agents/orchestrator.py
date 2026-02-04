@@ -27,6 +27,7 @@ class Intent(str, Enum):
     NUTRITION_WITH_ACTIVITY = "nutrition_with_activity"  # meal + workout/schedule
     MEAL_PLANNING = "meal_planning"                      # meal + schedule
     SHOPPING_FOR_MEAL = "shopping_for_meal"              # meal + shopping
+    FRIDGE_COMPREHENSIVE = "fridge_comprehensive"        # deep fridge analysis ("really")
     FRIDGE_ONLY = "fridge_only"                          # just fridge
     CALENDAR_ONLY = "calendar_only"                      # just calendar
     SHOPPING_ONLY = "shopping_only"                      # just shopping
@@ -38,6 +39,7 @@ INTENT_AGENT_BUNDLES: dict[Intent, list[AgentType]] = {
     Intent.NUTRITION_WITH_ACTIVITY: [AgentType.FRIDGE, AgentType.CALENDAR, AgentType.INSTACART],
     Intent.MEAL_PLANNING: [AgentType.FRIDGE, AgentType.CALENDAR],
     Intent.SHOPPING_FOR_MEAL: [AgentType.FRIDGE, AgentType.INSTACART],
+    Intent.FRIDGE_COMPREHENSIVE: [AgentType.FRIDGE],  # Deep analysis triggers comprehensive mode
     Intent.FRIDGE_ONLY: [AgentType.FRIDGE],
     Intent.CALENDAR_ONLY: [AgentType.CALENDAR],
     Intent.SHOPPING_ONLY: [AgentType.INSTACART],
@@ -113,6 +115,20 @@ class DomusOrchestrator:
         nutrition_keywords = ['meal', 'eat', 'food', 'snack', 'protein', 'carb', 'calorie', 'macro', 'nutrition']
         if any(kw in message_lower for kw in workout_keywords) and any(kw in message_lower for kw in nutrition_keywords):
             return Intent.NUTRITION_WITH_ACTIVITY
+
+        # Check for comprehensive fridge queries ("really", "full scan", etc.)
+        comprehensive_triggers = [
+            'really', 'full scan', 'complete analysis', 'comprehensive',
+            'deep check', 'thorough', 'everything in my fridge', 'detailed',
+            'tell me everything'
+        ]
+        fridge_keywords = ['fridge', 'refrigerator', 'food']
+        is_fridge_query = any(kw in message_lower for kw in fridge_keywords)
+        is_comprehensive = any(trigger in message_lower for trigger in comprehensive_triggers)
+
+        if is_fridge_query and is_comprehensive:
+            logger.info("Detected comprehensive fridge intent")
+            return Intent.FRIDGE_COMPREHENSIVE
 
         # Fall back to single-agent detection
         if any(kw in message_lower for kw in ['fridge', 'food', 'eat', 'cook', 'meal', 'ingredient']):
