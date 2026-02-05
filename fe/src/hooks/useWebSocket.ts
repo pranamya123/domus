@@ -20,8 +20,12 @@ import {
 import { scheduleBakeSaleNotification, sendLocalNotification } from './useCapacitor';
 
 const WS_URL = '/ws';
-const RECONNECT_DELAY = 3000;
-const MAX_RECONNECTS = 5;
+const RECONNECT_DELAY = 5000;
+const MAX_RECONNECTS = 3;
+
+// Track reconnect attempts globally to prevent reset on re-render
+let globalReconnectCount = 0;
+let reconnectStopped = false;
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
@@ -123,6 +127,12 @@ export function useWebSocket() {
   }, [setScreen, setAgentStatus, addMessage, setCapabilities, addNotification]);
   
   const connect = useCallback(() => {
+    // Stop if we've exceeded max reconnects
+    if (reconnectStopped) {
+      console.log('[WS] Reconnection stopped - max attempts reached');
+      return;
+    }
+
     if (!token || wsRef.current?.readyState === WebSocket.OPEN) {
       return;
     }
@@ -150,7 +160,9 @@ export function useWebSocket() {
     ws.onopen = () => {
       console.log('[WS] Connected');
       setConnected(true);
-      reconnectCountRef.current = 0;
+      // Reset global reconnect counter on successful connection
+      globalReconnectCount = 0;
+      reconnectStopped = false;
 
       // Schedule bake sale notification for 3 minutes from now
       // This is Feature 2: "Bake Sale Prep, Handled"
@@ -170,14 +182,17 @@ export function useWebSocket() {
       console.log('[WS] Disconnected:', event.code, event.reason);
       setConnected(false);
       wsRef.current = null;
-  
-      // Attempt reconnection
-      if (reconnectCountRef.current < MAX_RECONNECTS && token) {
-        reconnectCountRef.current++;
+
+      // Attempt reconnection with global counter to prevent infinite loops
+      if (!reconnectStopped && globalReconnectCount < MAX_RECONNECTS && token) {
+        globalReconnectCount++;
         console.log(
-          `[WS] Reconnecting in ${RECONNECT_DELAY}ms (attempt ${reconnectCountRef.current})`
+          `[WS] Reconnecting in ${RECONNECT_DELAY}ms (attempt ${globalReconnectCount}/${MAX_RECONNECTS})`
         );
         reconnectTimeoutRef.current = setTimeout(connect, RECONNECT_DELAY);
+      } else if (globalReconnectCount >= MAX_RECONNECTS) {
+        reconnectStopped = true;
+        console.log('[WS] Max reconnection attempts reached - stopping');
       }
     };
   

@@ -11,6 +11,7 @@ import { useApi } from './hooks/useApi';
 import { useCapacitor, getDeviceToken, NotificationTapData } from './hooks/useCapacitor';
 import { useGeofence, Geofence } from './hooks/useGeofence';
 import { ScreenType } from './types';
+import { DEMO_MODE } from './config';
 
 // Pages
 import { SplashScreen } from './pages/SplashScreen';
@@ -29,10 +30,18 @@ function App() {
   const setPendingOrderCard = useStore((state) => state.setPendingOrderCard);
   const { fetchCurrentUser, registerDeviceToken } = useApi();
 
-  // Clear session on app startup - require fresh login every time
+  // Demo mode: skip login and go directly to chat
+  // Non-demo mode: clear session on startup and require fresh login
   useEffect(() => {
-    console.log('[App] Startup - clearing previous session');
-    logout();
+    if (DEMO_MODE) {
+      console.log('[App] Demo mode enabled - skipping login');
+      // Set a dummy token to mark as authenticated
+      useStore.getState().setToken('demo-token');
+      setScreen(ScreenType.CHAT);
+    } else {
+      console.log('[App] Startup - clearing previous session');
+      logout();
+    }
   }, []); // Empty deps = run once on mount
 
   // Debug logging for iOS
@@ -129,8 +138,9 @@ function App() {
 
   // Fetch user on initial load if authenticated
   // Only logout on explicit 401 errors, not network failures
+  // Skip in demo mode - backend returns mock user
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && !DEMO_MODE) {
       fetchCurrentUser().catch((err) => {
         const errorMsg = err instanceof Error ? err.message : String(err);
         console.error('[App] fetchCurrentUser error:', errorMsg);

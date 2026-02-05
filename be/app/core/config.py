@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     app_name: str = "Domus"
     debug: bool = True
 
+    # Demo mode - bypasses authentication for all API calls
+    # Set DOMUS_DEMO_MODE=true in environment or .env
+    demo_mode: bool = True
+
     # Redis
     redis_url: str = "redis://localhost:6379"
     redis_password: Optional[str] = None

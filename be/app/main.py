@@ -6,16 +6,20 @@ Main entry point for the Domus backend API.
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, status
+
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared.schemas.events import (
+    CapabilitiesPayload,
     ScreenType,
     create_ui_screen_event,
 )
+from shared.schemas.state import UserSession
 
 from .core.config import settings
 from .core.auth import decode_token
@@ -99,24 +103,40 @@ app.include_router(router, prefix="/api")
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    token: str = Query(...)
+    token: str = Query(default="")
 ):
     """
     WebSocket endpoint for real-time event streaming.
 
     Connect with: ws://host/ws?token=<jwt_token>
+    In demo mode, token is optional.
     """
-    # Validate token
-    token_data = decode_token(token)
-    if not token_data:
-        await websocket.close(code=4001, reason="Invalid token")
-        return
+    # Demo mode: bypass authentication
+    if settings.demo_mode:
+        session = UserSession(
+            session_id=UUID("00000000-0000-0000-0000-000000000001"),
+            user_id="demo-user-001",
+            user_name="Demo User",
+            user_email="demo@domus.app",
+            expires_at=datetime.utcnow() + timedelta(days=365),
+            capabilities=CapabilitiesPayload(
+                blink_connected=True,
+                google_calendar_connected=True,
+                instacart_connected=True,
+            ),
+        )
+    else:
+        # Validate token
+        token_data = decode_token(token)
+        if not token_data:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
 
-    # Get session
-    session = await storage.state.get_session(UUID(token_data.session_id))
-    if not session:
-        await websocket.close(code=4002, reason="Session not found")
-        return
+        # Get session
+        session = await storage.state.get_session(UUID(token_data.session_id))
+        if not session:
+            await websocket.close(code=4002, reason="Session not found")
+            return
 
     # Connect
     await websocket_manager.connect(websocket, session)

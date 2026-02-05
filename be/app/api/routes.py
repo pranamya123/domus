@@ -68,6 +68,24 @@ async def get_current_session(
     storage: RedisDomusStorage = Depends(get_storage)
 ) -> UserSession:
     """Validate token and return current session."""
+    from ..core.config import settings
+    from datetime import timedelta
+
+    # Demo mode: return mock session without authentication
+    if settings.demo_mode:
+        return UserSession(
+            session_id=UUID("00000000-0000-0000-0000-000000000001"),
+            user_id="demo-user-001",
+            user_name="Demo User",
+            user_email="demo@domus.app",
+            expires_at=datetime.utcnow() + timedelta(days=365),
+            capabilities=CapabilitiesPayload(
+                blink_connected=True,
+                google_calendar_connected=True,
+                instacart_connected=True,
+            ),
+        )
+
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
