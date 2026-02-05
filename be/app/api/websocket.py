@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 # TODO: Change trigger to 2 days before the calendar event instead of 3 minutes after app open.
 BAKE_SALE_NOTIFICATION_DELAY_SECONDS = 180  # 3 minutes after app open
 
+# TODO: For demo only - triggers grocery store notification 7 minutes after app open.
+# In production, this would be triggered by actual iOS geofence entry via POST /location/entered.
+GROCERY_NOTIFICATION_DELAY_SECONDS = 420  # 7 minutes after app open
+
 
 class WebSocketManager:
     """Manages WebSocket connections and event broadcasting."""
@@ -47,6 +51,8 @@ class WebSocketManager:
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
         self._bake_sale_tasks: dict[str, asyncio.Task] = {}  # Track bake sale notification tasks
         self._bake_sale_notified: set[str] = set()  # Track users already notified (idempotency)
+        self._grocery_tasks: dict[str, asyncio.Task] = {}  # Track grocery notification tasks
+        self._grocery_notified: set[str] = set()  # Track users already notified (idempotency)
 
     async def connect(
         self,
@@ -79,6 +85,14 @@ class WebSocketManager:
         if user_id not in self._bake_sale_notified:
             self._bake_sale_tasks[user_id] = asyncio.create_task(
                 self._delayed_bake_sale_check(user_id, session)
+            )
+
+        # Schedule delayed grocery store notification (7 minutes after connect)
+        # TODO: For demo only - simulates user entering a grocery store.
+        # In production, this would be triggered by iOS geofence entry via POST /location/entered.
+        if user_id not in self._grocery_notified:
+            self._grocery_tasks[user_id] = asyncio.create_task(
+                self._delayed_grocery_check(user_id, session)
             )
 
     async def disconnect(self, user_id: str) -> None:
@@ -224,6 +238,88 @@ class WebSocketManager:
             logger.debug("Bake sale check cancelled for user %s", user_id)
         except Exception as e:
             logger.error("Bake sale check error for user %s: %s", user_id, e)
+
+    async def _delayed_grocery_check(
+        self,
+        user_id: str,
+        session: UserSession
+    ) -> None:
+        """
+        Simulate grocery store geofence entry after a delay.
+
+        TODO: For demo only - triggers 7 minutes after app open.
+        In production, this would be triggered by actual iOS geofence entry
+        via POST /location/entered when CLLocationManager detects didEnterRegion.
+        """
+        try:
+            logger.info(
+                "Grocery notification timer started for user %s (delay=%ds)",
+                user_id, GROCERY_NOTIFICATION_DELAY_SECONDS
+            )
+
+            # Wait for configured delay
+            await asyncio.sleep(GROCERY_NOTIFICATION_DELAY_SECONDS)
+
+            logger.info("Grocery notification timer fired for user %s", user_id)
+
+            # Check idempotency - only notify once per session
+            if user_id in self._grocery_notified:
+                logger.debug("User %s already notified about grocery", user_id)
+                return
+
+            # Import services
+            from ..services.location_service import get_location_service, GeofenceEntry
+            from ..services.grocery_notification_service import get_grocery_notification_service
+
+            location_service = get_location_service()
+            grocery_service = get_grocery_notification_service(self._storage)
+
+            # Simulate entering the demo grocery store (Whole Foods)
+            entry = GeofenceEntry(
+                user_id=user_id,
+                place_id="demo_grocery",
+                timestamp=datetime.utcnow(),
+            )
+
+            store = location_service.validate_entry(entry)
+            if not store:
+                logger.debug("Demo grocery store not found")
+                return
+
+            # Generate notification
+            notification = await grocery_service.handle_geofence_entry(entry, store)
+
+            if notification:
+                # Mark as notified (idempotency)
+                self._grocery_notified.add(user_id)
+
+                # Send WebSocket event for real-time UI update
+                if user_id in self._connections:
+                    notification_event = DomusEvent(
+                        type=EventType.NOTIFICATION_CREATED,
+                        payload={
+                            "notification_id": notification["notification_id"],
+                            "title": notification["title"],
+                            "body": notification["body"],
+                            "notification_type": "proactive",
+                            "has_action_card": True,
+                        }
+                    )
+                    await self.broadcast_to_user(user_id, notification_event)
+                    logger.info(
+                        "Grocery notification sent (realtime) for user %s: %s at %s",
+                        user_id, notification["item"], notification["store"]
+                    )
+                else:
+                    logger.info(
+                        "Grocery notification saved for user %s (will deliver on reconnect)",
+                        user_id
+                    )
+
+        except asyncio.CancelledError:
+            logger.debug("Grocery check cancelled for user %s", user_id)
+        except Exception as e:
+            logger.error("Grocery check error for user %s: %s", user_id, e)
 
     async def send_event(self, user_id: str, event: DomusEvent) -> bool:
         """

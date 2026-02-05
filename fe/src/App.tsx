@@ -9,6 +9,7 @@ import { useEffect, useCallback } from 'react';
 import { useStore } from './store/useStore';
 import { useApi } from './hooks/useApi';
 import { useCapacitor, getDeviceToken, NotificationTapData } from './hooks/useCapacitor';
+import { useGeofence, Geofence } from './hooks/useGeofence';
 import { ScreenType } from './types';
 
 // Pages
@@ -83,6 +84,26 @@ function App() {
   const { isNative, platform } = useCapacitor({
     onNotificationTap: handleNotificationTap,
   });
+
+  // Handle geofence entry (grocery store detection)
+  const handleGeofenceEnter = useCallback((geofence: Geofence) => {
+    console.log('[App] Entered geofence:', geofence.name);
+    // Notification is handled by backend - this is just for logging/UI updates
+  }, []);
+
+  // Initialize geofencing for location-based grocery notifications
+  // Only active when authenticated and on native platform
+  const { isActive: isGeofenceActive, geofences } = useGeofence({
+    enabled: isAuthenticated && isNative,
+    onGeofenceEnter: handleGeofenceEnter,
+  });
+
+  // Log geofence status
+  useEffect(() => {
+    if (isGeofenceActive) {
+      console.log('[App] Geofencing active with', geofences.length, 'stores');
+    }
+  }, [isGeofenceActive, geofences.length]);
 
   // Register device token with backend when authenticated
   useEffect(() => {

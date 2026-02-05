@@ -928,3 +928,165 @@ async def send_test_push(
         "push_error": result.error,
         "message": "Test push sent" if result.success else f"Push failed: {result.error}"
     }
+
+
+# ============================================================================
+# Location / Geofencing (Demo)
+# ============================================================================
+
+class GeofenceEntryRequest(BaseModel):
+    """Request when user enters a geofence."""
+    place_id: str
+    timestamp: Optional[datetime] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
+@router.get("/location/geofences", tags=["location"])
+async def get_demo_geofences(
+    session: UserSession = Depends(get_current_session),
+):
+    """
+    Get demo store geofences for iOS registration.
+
+    Returns list of stores with coordinates and radius for CLCircularRegion.
+    iOS app should call this on launch and register these geofences.
+    """
+    from ..services.location_service import get_location_service
+
+    location_service = get_location_service()
+    stores = location_service.get_demo_stores()
+
+    return {
+        "geofences": stores,
+        "count": len(stores),
+        "message": "Register these geofences with CLLocationManager"
+    }
+
+
+@router.post("/location/entered", tags=["location"])
+async def handle_geofence_entry(
+    request: GeofenceEntryRequest,
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """
+    Handle geofence entry event from iOS.
+
+    Called when iOS detects user entered a registered geofence.
+    This is the critical endpoint that triggers grocery notifications.
+
+    Flow:
+    1. iOS detects didEnterRegion
+    2. iOS sends POST /location/entered with place_id
+    3. Backend checks inventory for low/out items
+    4. Backend sends push notification if conditions match
+    """
+    from ..services.location_service import get_location_service, GeofenceEntry
+    from ..services.grocery_notification_service import get_grocery_notification_service
+
+    location_service = get_location_service()
+    grocery_service = get_grocery_notification_service(storage)
+
+    # Create entry event
+    entry = GeofenceEntry(
+        user_id=session.user_id,
+        place_id=request.place_id,
+        timestamp=request.timestamp or datetime.utcnow(),
+        latitude=request.latitude,
+        longitude=request.longitude,
+    )
+
+    # Validate entry and get store info
+    store = location_service.validate_entry(entry)
+    if not store:
+        return {
+            "triggered": False,
+            "reason": "Unknown or non-grocery store"
+        }
+
+    # Check inventory and send notification if needed
+    notification = await grocery_service.handle_geofence_entry(entry, store)
+
+    if notification:
+        # Also emit WebSocket event for real-time UI update
+        from shared.schemas.events import DomusEvent, EventType
+        notification_event = DomusEvent(
+            type=EventType.NOTIFICATION_CREATED,
+            payload={
+                "notification_id": notification["notification_id"],
+                "title": notification["title"],
+                "body": notification["body"],
+                "notification_type": "proactive",
+            }
+        )
+        await storage.events.publish(notification_event, session.user_id)
+
+        return {
+            "triggered": True,
+            "notification_id": notification["notification_id"],
+            "store": notification["store"],
+            "item": notification["item"],
+            "message": f"Notification sent for {notification['item']} at {notification['store']}"
+        }
+
+    return {
+        "triggered": False,
+        "reason": "No low items or cooldown active"
+    }
+
+
+@router.post("/location/test-entry", tags=["location"])
+async def test_geofence_entry(
+    session: UserSession = Depends(get_current_session),
+    storage: RedisDomusStorage = Depends(get_storage)
+):
+    """
+    Test endpoint to simulate a geofence entry.
+
+    Simulates entering the demo Whole Foods location.
+    Use this to test the notification flow without actually moving.
+    """
+    from ..services.location_service import get_location_service, GeofenceEntry
+    from ..services.grocery_notification_service import get_grocery_notification_service
+
+    location_service = get_location_service()
+    grocery_service = get_grocery_notification_service(storage)
+
+    # Simulate entering demo grocery store
+    entry = GeofenceEntry(
+        user_id=session.user_id,
+        place_id="demo_grocery",
+        timestamp=datetime.utcnow(),
+    )
+
+    store = location_service.validate_entry(entry)
+    if not store:
+        return {"error": "Demo store not found"}
+
+    notification = await grocery_service.handle_geofence_entry(entry, store)
+
+    if notification:
+        # Emit WebSocket event
+        from shared.schemas.events import DomusEvent, EventType
+        notification_event = DomusEvent(
+            type=EventType.NOTIFICATION_CREATED,
+            payload={
+                "notification_id": notification["notification_id"],
+                "title": notification["title"],
+                "body": notification["body"],
+                "notification_type": "proactive",
+            }
+        )
+        await storage.events.publish(notification_event, session.user_id)
+
+        return {
+            "success": True,
+            "notification": notification,
+            "message": "Test geofence entry triggered notification"
+        }
+
+    return {
+        "success": False,
+        "message": "No notification sent (cooldown active or no low items)"
+    }

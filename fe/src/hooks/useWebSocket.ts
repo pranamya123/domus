@@ -17,7 +17,7 @@ import {
   isNotificationCreatedEvent,
   Notification,
 } from '../types';
-import { scheduleBakeSaleNotification } from './useCapacitor';
+import { scheduleBakeSaleNotification, sendLocalNotification } from './useCapacitor';
 
 const WS_URL = '/ws';
 const RECONNECT_DELAY = 3000;
@@ -103,6 +103,17 @@ export function useWebSocket() {
           };
           addNotification(newNotification);
           console.log('[WS] New notification added:', newNotification.title);
+
+          // Trigger iOS local notification for proactive notifications
+          // This makes it appear as a system notification (banner + sound)
+          if (notifPayload.notification_type === 'proactive') {
+            sendLocalNotification(
+              notifPayload.title,
+              notifPayload.body,
+              notifPayload.notification_id
+            );
+            console.log('[WS] iOS local notification triggered:', notifPayload.title);
+          }
         }
         break;
 

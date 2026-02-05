@@ -45,5 +45,15 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Domus uses your location to notify you about grocery items when you're near a store.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Domus uses your location to notify you about grocery items when you're near a store, even when the app is in the background.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>fetch</string>
+		<string>remote-notification</string>
+	</array>
 </dict>
 </plist>
