@@ -642,7 +642,7 @@ input, textarea {
 
 .thinking-dot {
   display: inline-block;
-  color: #077507;
+  color: #034F03;
   font-size: 10px;
   animation: thinkingPulse 1.4s infinite ease-in-out;
 }

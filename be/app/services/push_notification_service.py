@@ -217,7 +217,7 @@ class PushNotificationService:
         """
         return await self.send_notification(
             user_id=user_id,
-            title=notification_record.get("title", "Domus"),
+            title=notification_record.get("title", "domus"),
             body=notification_record.get("body", ""),
             notification_id=notification_record.get("notification_id"),
         )

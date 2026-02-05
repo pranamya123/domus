@@ -28,7 +28,7 @@ export function SplashScreen() {
       const targetScreen = isAuthenticated ? ScreenType.CHAT : ScreenType.LOGIN;
       console.log('[Splash] Timer fired, navigating to:', targetScreen);
       setScreen(targetScreen);
-    }, 4000); // <-- CHANGE THIS VALUE FOR DURATION (milliseconds)
+    }, 3000); // 3 seconds splash duration
 
     return () => {
       console.log('[Splash] Cleaning up timer');
@@ -70,7 +70,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontFamily: '"Playfair Display", serif',
     fontSize: '73px',
     fontWeight: 800,
-    color: '#077507',
+    color: '#034F03',
     margin: 0,
     lineHeight: 1,
   },

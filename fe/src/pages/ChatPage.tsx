@@ -10,6 +10,8 @@ import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useApi } from '../hooks/useApi';
 import { AgentType, AgentStatus, Notification } from '../types';
+import { FridgeResponseCard } from '../components/FridgeResponseCard';
+import { parseFridgeResponse, isFridgeResponse } from '../utils/parseFridgeResponse';
 
 const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : 'http://localhost:8000/api';
 
@@ -73,6 +75,23 @@ export function ChatPage() {
 
   const { isConnected, sendMessage } = useWebSocket();
   const { blinkLogin, blinkVerify, token, fetchNotifications, resolveNotificationToChat } = useApi();
+
+  // Add initial greeting message from Domus on first load
+  const [hasGreeted, setHasGreeted] = useState(false);
+  useEffect(() => {
+    if (!hasGreeted && messages.length === 0) {
+      setHasGreeted(true);
+      // Small delay to let the UI settle
+      setTimeout(() => {
+        addMessage({
+          id: 'greeting-initial',
+          content: "Hello! I'm Domus, your home assistant. I can help you manage your fridge, schedule, and more. What would you like to do today?",
+          sender: 'domus',
+          timestamp: new Date().toISOString(),
+        });
+      }, 500);
+    }
+  }, [hasGreeted, messages.length, addMessage]);
 
   // Handle pending order card from iOS notification tap (set by App.tsx)
   useEffect(() => {
@@ -338,7 +357,7 @@ export function ChatPage() {
               <span style={styles.menuItemTitle}>Fridge Sense</span>
               <span style={{
                 ...styles.menuItemStatus,
-                color: capabilities.blink_connected ? '#077507' : '#D32F2F',
+                color: capabilities.blink_connected ? '#034F03' : '#D32F2F',
                 textTransform: capabilities.blink_connected ? 'none' : 'uppercase',
                 fontSize: capabilities.blink_connected ? '10px' : '9px',
               }}>
@@ -498,7 +517,7 @@ export function ChatPage() {
           <div style={styles.blinkModal}>
             <div style={styles.successIcon}>
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-                <circle cx="24" cy="24" r="24" fill="#077507"/>
+                <circle cx="24" cy="24" r="24" fill="#034F03"/>
                 <path d="M14 24L21 31L34 18" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
             </div>
@@ -612,38 +631,60 @@ export function ChatPage() {
           </div>
         ) : (
           <div style={styles.messagesContainer}>
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                style={{
-                  ...styles.message,
-                  ...(msg.sender === 'user' ? styles.userMessage : styles.domusMessage),
-                }}
-              >
-                {msg.sender === 'domus' ? (
-                  <div style={styles.markdownContainer}>
-                    <ReactMarkdown
-                      components={{
-                        // Custom renderers for markdown elements
-                        p: ({ children }) => <p style={styles.mdParagraph}>{children}</p>,
-                        strong: ({ children }) => <strong style={styles.mdStrong}>{children}</strong>,
-                        ul: ({ children }) => <ul style={styles.mdList}>{children}</ul>,
-                        ol: ({ children }) => <ol style={styles.mdList}>{children}</ol>,
-                        li: ({ children }) => <li style={styles.mdListItem}>{children}</li>,
-                        h1: ({ children }) => <h1 style={styles.mdH1}>{children}</h1>,
-                        h2: ({ children }) => <h2 style={styles.mdH2}>{children}</h2>,
-                        h3: ({ children }) => <h3 style={styles.mdH3}>{children}</h3>,
-                        code: ({ children }) => <code style={styles.mdCode}>{children}</code>,
-                      }}
-                    >
-                      {msg.content}
-                    </ReactMarkdown>
+            {messages.map((msg) => {
+              const isDomus = msg.sender === 'domus';
+              const fridgeData = isDomus ? parseFridgeResponse(msg.content) : null;
+              const isFridgeCard = !!fridgeData;
+
+              // User messages (right-aligned, no avatar)
+              if (!isDomus) {
+                return (
+                  <div key={msg.id} style={styles.userMessageWrapper}>
+                    <div style={styles.userMessage}>
+                      <p style={styles.messageText}>{msg.content}</p>
+                    </div>
                   </div>
-                ) : (
-                  <p style={styles.messageText}>{msg.content}</p>
-                )}
-              </div>
-            ))}
+                );
+              }
+
+              // Domus messages (left-aligned with avatar)
+              return (
+                <div key={msg.id} style={styles.domusMessageWrapper}>
+                  {/* Avatar on the left */}
+                  <div style={styles.domusAvatar}>
+                    <span style={styles.domusAvatarText}>d.</span>
+                  </div>
+
+                  {/* Content column */}
+                  <div style={styles.domusContentCol}>
+                    {/* Message content */}
+                    <div style={isFridgeCard ? styles.domusFridgeMessage : styles.domusMessage}>
+                      {isFridgeCard ? (
+                        <FridgeResponseCard data={fridgeData} />
+                      ) : (
+                        <div style={styles.markdownContainer}>
+                          <ReactMarkdown
+                            components={{
+                              p: ({ children }) => <p style={styles.mdParagraph}>{children}</p>,
+                              strong: ({ children }) => <strong style={styles.mdStrong}>{children}</strong>,
+                              ul: ({ children }) => <ul style={styles.mdList}>{children}</ul>,
+                              ol: ({ children }) => <ol style={styles.mdList}>{children}</ol>,
+                              li: ({ children }) => <li style={styles.mdListItem}>{children}</li>,
+                              h1: ({ children }) => <h1 style={styles.mdH1}>{children}</h1>,
+                              h2: ({ children }) => <h2 style={styles.mdH2}>{children}</h2>,
+                              h3: ({ children }) => <h3 style={styles.mdH3}>{children}</h3>,
+                              code: ({ children }) => <code style={styles.mdCode}>{children}</code>,
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
             {/* Thinking indicator */}
             {isThinking && (
               <div style={styles.thinkingContainer}>
@@ -653,7 +694,7 @@ export function ChatPage() {
                   <span className="thinking-dot">●</span>
                 </div>
                 <span style={styles.thinkingText}>
-                  {activatingAgent ? `${activatingAgent} is thinking...` : 'Thinking...'}
+                  {activatingAgent ? `Activating ${activatingAgent} agent...` : 'Thinking...'}
                 </span>
               </div>
             )}
@@ -663,7 +704,7 @@ export function ChatPage() {
                 {card.status === 'approved' ? (
                   <div style={styles.orderCardApproved}>
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                      <circle cx="12" cy="12" r="10" fill="#077507"/>
+                      <circle cx="12" cy="12" r="10" fill="#034F03"/>
                       <path d="M8 12L11 15L16 9" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
                     <span style={styles.orderCardApprovedText}>Order placed</span>
@@ -697,47 +738,41 @@ export function ChatPage() {
         )}
       </div>
 
-      {/* Bottom input card */}
-      <div style={styles.bottomCard}>
-        <div style={styles.inputRow}>
-          <input
-            type="text"
-            style={styles.input}
-            placeholder="Write your prompt here..."
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            className="placeholder-style"
-          />
-          <button style={styles.sendButton} onClick={handleSend} disabled={!inputValue.trim() || isAgentActivating}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8A8A8A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 2L11 13"/>
-              <path d="M22 2L15 22L11 13L2 9L22 2Z"/>
-            </svg>
-          </button>
-        </div>
-        <div style={styles.bottomRow}>
-          {/* Scan icon - opens camera */}
-          <button style={styles.scanButton} onClick={handleScanClick}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#A1A1A1" strokeWidth="2">
-              <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
-              <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
-              <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
-              <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
-              <line x1="3" y1="12" x2="21" y2="12"/>
-            </svg>
-          </button>
-          {/* Speak button */}
-          <button style={styles.speakButton}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            <span style={styles.speakText}>Speak</span>
-          </button>
-        </div>
+      {/* Bottom input card - pill shaped */}
+      <div style={styles.inputPill}>
+        {/* Microphone icon */}
+        <button style={styles.micButton}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#034F03" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+
+        {/* Input field */}
+        <input
+          type="text"
+          style={styles.pillInput}
+          placeholder="Type your message..."
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+
+        {/* Send button - dark green circle with send arrow */}
+        <button
+          style={{
+            ...styles.sendButtonCircle,
+            opacity: inputValue.trim() && !isAgentActivating ? 1 : 0.6,
+          }}
+          onClick={handleSend}
+          disabled={!inputValue.trim() || isAgentActivating}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
       </div>
     </div>
   );
@@ -809,7 +844,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontFamily: '"Roboto", sans-serif',
     fontSize: '10px',
     fontWeight: 400,
-    color: '#077507',
+    color: '#034F03',
   },
   menuItemDesc: {
     fontFamily: '"Roboto", sans-serif',
@@ -914,7 +949,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '12px',
     fontWeight: 400,
     color: '#000000',
-    backgroundColor: '#EDF7ED',
+    backgroundColor: '#EBF0EB',
     border: '1px solid #C7D4C7',
     borderRadius: '25px',
     outline: 'none',
@@ -972,7 +1007,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontFamily: '"Playfair Display", serif',
     fontSize: '32px',
     fontWeight: 800,
-    color: '#077507',
+    color: '#034F03',
     marginLeft: '1px',
   },
   greeting: {
@@ -1019,23 +1054,86 @@ const styles: { [key: string]: React.CSSProperties } = {
   },
   messagesContainer: {
     width: '100%',
-    maxWidth: '400px',
+    maxWidth: '100%',
     display: 'flex',
     flexDirection: 'column',
-    gap: '12px',
+    gap: '16px',
+    paddingRight: '8px',
   },
-  message: {
-    padding: '12px 16px',
-    borderRadius: '16px',
-    maxWidth: '80%',
+  // User message (right-aligned)
+  userMessageWrapper: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    width: '100%',
   },
   userMessage: {
-    alignSelf: 'flex-end',
     backgroundColor: '#FFFFFF',
+    borderRadius: '16px',
+    padding: '12px 16px',
+    maxWidth: '75%',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+  },
+  // Domus message (left-aligned with avatar)
+  domusMessageWrapper: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '10px',
+    width: '100%',
+  },
+  domusAvatar: {
+    width: '32px',
+    height: '32px',
+    borderRadius: '50%',
+    backgroundColor: '#E8F5E9',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    marginTop: '2px',
+  },
+  domusAvatarText: {
+    fontFamily: '"Playfair Display", serif',
+    fontSize: '16px',
+    fontWeight: 700,
+    color: '#034F03',
+  },
+  domusContentCol: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    flex: 1,
+    minWidth: 0,
+  },
+  domusHeaderBubble: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: '18px',
+    padding: '8px 14px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+    alignSelf: 'flex-start',
+  },
+  domusHeaderText: {
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontSize: '14px',
+    fontWeight: 400,
+    color: '#1a1a1a',
+  },
+  domusHeaderEmoji: {
+    fontSize: '14px',
   },
   domusMessage: {
-    alignSelf: 'flex-start',
     backgroundColor: '#DAF7DA',
+    borderRadius: '16px',
+    padding: '12px 16px',
+    maxWidth: '100%',
+  },
+  domusFridgeMessage: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'transparent',
+    padding: 0,
+    maxWidth: '100%',
   },
   messageText: {
     margin: 0,
@@ -1073,78 +1171,55 @@ const styles: { [key: string]: React.CSSProperties } = {
     color: '#5E5D5D',
     fontStyle: 'italic',
   },
-  bottomCard: {
-    width: 'calc(100% - 32px)',
-    maxWidth: '340px',
-    minHeight: '100px',
-    backgroundColor: 'rgba(255, 255, 255, 0.7)',
-    borderRadius: '10px',
-    padding: '12px 16px',
-    margin: '0 auto',
-    marginBottom: 'calc(env(safe-area-inset-bottom, 0px) + 24px)',
-    boxSizing: 'border-box',
+  // New pill-shaped input styles
+  inputPill: {
     display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '12px',
+    backgroundColor: '#FFFFFF',
+    borderRadius: '50px',
+    padding: '8px 8px 8px 16px',
+    margin: '0 20px',
+    marginBottom: 'calc(env(safe-area-inset-bottom, 0px) + 24px)',
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
     flexShrink: 0,
     position: 'relative' as const,
     zIndex: 10,
   },
-  inputRow: {
+  micButton: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '4px',
     display: 'flex',
     alignItems: 'center',
-    gap: '12px',
-    minHeight: '44px',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
-  input: {
+  pillInput: {
     flex: 1,
     border: 'none',
     outline: 'none',
     fontFamily: '"Roboto", sans-serif',
-    fontSize: '16px',
+    fontSize: '17px',
     color: '#000000',
     backgroundColor: 'transparent',
     WebkitAppearance: 'none' as const,
     padding: '8px 0',
     minHeight: '24px',
   },
-  sendButton: {
-    background: 'none',
+  sendButtonCircle: {
+    width: '42px',
+    height: '42px',
+    borderRadius: '50%',
+    backgroundColor: '#034F03',
     border: 'none',
     cursor: 'pointer',
-    padding: 0,
-    marginRight: '4px',
     display: 'flex',
     alignItems: 'center',
-  },
-  bottomRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  scanButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: 0,
-    display: 'flex',
-    alignItems: 'center',
-  },
-  speakButton: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    backgroundColor: '#FCFCFC',
-    border: '1px solid #E3E3E3',
-    borderRadius: '10px',
-    padding: '8px 12px',
-    cursor: 'pointer',
-  },
-  speakText: {
-    fontFamily: '"Roboto", sans-serif',
-    fontSize: '12px',
-    fontWeight: 400,
-    color: '#000000',
+    justifyContent: 'center',
+    flexShrink: 0,
+    transition: 'opacity 0.2s',
   },
   // Notification styles
   notificationBadge: {
@@ -1241,7 +1316,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontFamily: '"Roboto", sans-serif',
     fontSize: '10px',
     fontWeight: 400,
-    color: '#077507',
+    color: '#034F03',
     backgroundColor: '#E8F5E9',
     padding: '2px 6px',
     borderRadius: '4px',
@@ -1301,7 +1376,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   orderCardApproveBtn: {
     flex: 1,
     padding: '10px 16px',
-    backgroundColor: '#077507',
+    backgroundColor: '#034F03',
     border: 'none',
     borderRadius: '8px',
     fontFamily: '"Roboto", sans-serif',
@@ -1321,7 +1396,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontFamily: '"Roboto", sans-serif',
     fontSize: '14px',
     fontWeight: 500,
-    color: '#077507',
+    color: '#034F03',
   },
   // Markdown styles for assistant messages
   markdownContainer: {
@@ -1336,7 +1411,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   },
   mdStrong: {
     fontWeight: 600,
-    color: '#077507',
+    color: '#034F03',
   },
   mdList: {
     margin: '4px 0 8px 0',

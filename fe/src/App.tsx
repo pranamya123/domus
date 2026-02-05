@@ -30,14 +30,15 @@ function App() {
   const setPendingOrderCard = useStore((state) => state.setPendingOrderCard);
   const { fetchCurrentUser, registerDeviceToken } = useApi();
 
-  // Demo mode: skip login and go directly to chat
+  // Demo mode: skip login, show splash, then go to chat
   // Non-demo mode: clear session on startup and require fresh login
   useEffect(() => {
     if (DEMO_MODE) {
       console.log('[App] Demo mode enabled - skipping login');
       // Set a dummy token to mark as authenticated
       useStore.getState().setToken('demo-token');
-      setScreen(ScreenType.CHAT);
+      // Stay on splash screen - SplashScreen component will navigate to chat after 3s
+      setScreen(ScreenType.SPLASH);
     } else {
       console.log('[App] Startup - clearing previous session');
       logout();
