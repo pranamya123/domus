@@ -23,6 +23,7 @@ export interface RunningLowCategory {
 }
 
 export interface FridgeResponseData {
+  insight?: string;
   inventory?: InventoryItem[];
   meals?: MealSuggestion[];
   runningLow?: RunningLowCategory[];
@@ -33,13 +34,18 @@ const ITEM_IMAGES: Record<string, string> = {
   // Vegetables
   cucumber: 'https://images.unsplash.com/photo-1449300079323-02e209d9d3a6?w=400&q=80',
   'bell pepper': 'https://images.unsplash.com/photo-1563565375-f3fdfdbefa83?w=400&q=80',
+  pepper: 'https://images.unsplash.com/photo-1563565375-f3fdfdbefa83?w=400&q=80',
   lettuce: 'https://images.unsplash.com/photo-1622206151226-18ca2c9ab4a1?w=400&q=80',
+  leafy: 'https://images.unsplash.com/photo-1622206151226-18ca2c9ab4a1?w=400&q=80',
   tomato: 'https://images.unsplash.com/photo-1546470427-227c7369a9b8?w=400&q=80',
+  cherry: 'https://images.unsplash.com/photo-1546470427-227c7369a9b8?w=400&q=80',
   zucchini: 'https://images.unsplash.com/photo-1563252722-6434563a985d?w=400&q=80',
   'green onion': 'https://images.unsplash.com/photo-1590165482129-1b8b27698780?w=400&q=80',
+  onion: 'https://images.unsplash.com/photo-1590165482129-1b8b27698780?w=400&q=80',
   carrot: 'https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?w=400&q=80',
   broccoli: 'https://images.unsplash.com/photo-1459411552884-841db9b3cc2a?w=400&q=80',
   spinach: 'https://images.unsplash.com/photo-1576045057995-568f588f82fb?w=400&q=80',
+  chickpea: 'https://images.unsplash.com/photo-1515543904702-8c828e6ac1b2?w=400&q=80',
 
   // Dairy & Proteins
   cheese: 'https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=400&q=80',
@@ -79,14 +85,12 @@ function InventoryCard({ item }: { item: InventoryItem }) {
   const dotColor = item.freshness === 'fresh' ? '#22C55E' : item.freshness === 'expiring' ? '#F59E0B' : '#EF4444';
   const imageUrl = item.image || getItemImage(item.name);
 
+  // Don't render if no valid image
+  if (!imageUrl) return null;
+
   return (
     <div style={styles.inventoryCard}>
-      {/* Only show image if we have a valid URL */}
-      {imageUrl ? (
-        <img src={imageUrl} alt={item.name} style={styles.inventoryImg} />
-      ) : (
-        <div style={styles.inventoryImgPlaceholder} />
-      )}
+      <img src={imageUrl} alt={item.name} style={styles.inventoryImg} />
       <div style={styles.inventoryMeta}>
         <div style={styles.inventoryNameRow}>
           <svg style={styles.checkIcon} viewBox="0 0 16 16" fill="#22C55E">
@@ -109,10 +113,8 @@ function MealCard({ meal }: { meal: MealSuggestion }) {
   const imageUrl = meal.image || getItemImage(meal.name);
   return (
     <div style={styles.mealCard}>
-      {imageUrl ? (
+      {imageUrl && (
         <img src={imageUrl} alt={meal.name} style={styles.mealImg} />
-      ) : (
-        <div style={styles.mealImgPlaceholder} />
       )}
       <span style={styles.mealName}>{meal.name}</span>
     </div>
@@ -142,6 +144,13 @@ export function FridgeResponseCard({ data }: { data: FridgeResponseData }) {
 
   return (
     <div style={styles.wrapper}>
+      {/* Insight Summary */}
+      {data.insight && (
+        <div style={styles.insightSection}>
+          <p style={styles.insightText}>{data.insight}</p>
+        </div>
+      )}
+
       {/* Inventory */}
       {inventoryWithImages.length > 0 && (
         <div style={styles.section}>
@@ -180,13 +189,6 @@ export function FridgeResponseCard({ data }: { data: FridgeResponseData }) {
           </div>
         </div>
       )}
-
-      {/* Follow-up prompt */}
-      <div style={styles.followUpSection}>
-        <span style={styles.followUpText}>
-          Would you like me to suggest a recipe or help you order the missing items?
-        </span>
-      </div>
     </div>
   );
 }
@@ -197,6 +199,18 @@ const styles: { [key: string]: React.CSSProperties } = {
     flexDirection: 'column',
     gap: '12px',
     width: '100%',
+  },
+  insightSection: {
+    backgroundColor: '#DAF7DA',
+    borderRadius: '14px',
+    padding: '14px 16px',
+  },
+  insightText: {
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontSize: '14px',
+    color: '#1a1a1a',
+    lineHeight: 1.5,
+    margin: 0,
   },
   section: {
     backgroundColor: '#FFFFFF',
@@ -246,11 +260,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     width: '100%',
     height: '52px',
     objectFit: 'cover',
-  },
-  inventoryImgPlaceholder: {
-    width: '100%',
-    height: '52px',
-    backgroundColor: '#E8E8E8',
   },
   checkIcon: {
     width: '14px',
@@ -317,13 +326,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     borderRadius: '10px',
     marginBottom: '6px',
   },
-  mealImgPlaceholder: {
-    width: '100%',
-    height: '72px',
-    backgroundColor: '#E8E8E8',
-    borderRadius: '10px',
-    marginBottom: '6px',
-  },
   mealName: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     fontSize: '11px',
@@ -362,19 +364,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '11px',
     color: '#666',
     lineHeight: 1.6,
-  },
-
-  // Follow-up prompt
-  followUpSection: {
-    backgroundColor: '#DAF7DA',
-    borderRadius: '14px',
-    padding: '14px 16px',
-  },
-  followUpText: {
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    fontSize: '14px',
-    color: '#1a1a1a',
-    lineHeight: 1.5,
   },
 };
 

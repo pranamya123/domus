@@ -81,15 +81,13 @@ export function ChatPage() {
   useEffect(() => {
     if (!hasGreeted && messages.length === 0) {
       setHasGreeted(true);
-      // Small delay to let the UI settle
-      setTimeout(() => {
-        addMessage({
-          id: 'greeting-initial',
-          content: "Hello! I'm Domus, your home assistant. I can help you manage your fridge, schedule, and more. What would you like to do today?",
-          sender: 'domus',
-          timestamp: new Date().toISOString(),
-        });
-      }, 500);
+      // Add greeting immediately
+      addMessage({
+        id: 'greeting-initial',
+        content: "Hello! I'm Domus, your home assistant. I can help you manage your fridge, schedule, and more. What would you like to do today?",
+        sender: 'domus',
+        timestamp: new Date().toISOString(),
+      });
     }
   }, [hasGreeted, messages.length, addMessage]);
 
@@ -621,16 +619,8 @@ export function ChatPage() {
       )}
 
       {/* Main content */}
-      <div style={{
-        ...styles.mainContent,
-        justifyContent: messages.length === 0 ? 'center' : 'flex-end',
-      }}>
-        {messages.length === 0 ? (
-          <div style={styles.emptyState}>
-            <h1 style={styles.emptyTitle}>Ready to manage{'\n'}your home?</h1>
-          </div>
-        ) : (
-          <div style={styles.messagesContainer}>
+      <div style={styles.mainContent}>
+        <div style={styles.messagesContainer}>
             {messages.map((msg) => {
               const isDomus = msg.sender === 'domus';
               const fridgeData = isDomus ? parseFridgeResponse(msg.content) : null;
@@ -735,7 +725,6 @@ export function ChatPage() {
             ))}
             <div ref={messagesEndRef} />
           </div>
-        )}
       </div>
 
       {/* Bottom input card - pill shaped */}
@@ -782,7 +771,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   container: {
     height: '100vh',
     width: '100vw',
-    backgroundColor: '#E8F5E9',
+    backgroundColor: '#F8FAF8',
     display: 'flex',
     flexDirection: 'column',
     position: 'fixed',
@@ -1033,24 +1022,11 @@ const styles: { [key: string]: React.CSSProperties } = {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
     padding: '12px 16px',
     overflow: 'auto',
     minHeight: 0,
-  },
-  emptyState: {
-    textAlign: 'center',
-    marginBottom: '80px',
-  },
-  emptyTitle: {
-    fontFamily: '"Prata", serif',
-    fontSize: '42px',
-    fontWeight: 400,
-    color: '#000000',
-    margin: 0,
-    lineHeight: 1.2,
-    whiteSpace: 'pre-line',
   },
   messagesContainer: {
     width: '100%',

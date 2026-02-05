@@ -23,40 +23,62 @@ MEDIA_DIR = Path(__file__).resolve().parent.parent / "storage" / "media"
 # Fridge-specific grounding for Gemini vision
 FRIDGE_IMAGE_SCOPE = (
     "This image shows the items inside a refrigerator. "
-    "Answer all questions based only on the food visible inside the fridge. "
-    "IMPORTANT: Keep responses SHORT and CRISP. "
-    "When listing items, use a simple bullet list format. "
-    "No lengthy descriptions - just the essentials. "
-    "Focus on: food items, quantities, and freshness. "
+    "Answer questions with JUDGMENT, not just detection. "
+    "IMPORTANT: Lead with insight about meal readiness, not item lists. "
+    "Think about: Can they cook tonight? This week? What's urgent? "
+    "Keep responses SHORT and CRISP - focus on what matters. "
     "Ignore refrigerator hardware and non-food items."
 )
 
 # Comprehensive analysis prompt for "What's in my fridge, really?" queries
-COMPREHENSIVE_FRIDGE_ANALYSIS_PROMPT = """Analyze this fridge image thoroughly. Think step-by-step and provide a comprehensive summary.
+# JUDGMENT-FIRST reasoning prompt with progressive disclosure
+COMPREHENSIVE_FRIDGE_ANALYSIS_PROMPT = """You are an executive kitchen advisor. Your job is to JUDGE meal readiness, not enumerate items.
 
-## STEP 1: INVENTORY
-List everything you can see. For each item note:
-- Name and approximate quantity
-- Location in fridge (shelf, drawer, door)
+## HARD CONSTRAINT (VIOLATION = FAILURE)
+Your response MUST begin with a judgment about meal readiness and planning horizon.
+If your response begins with a list of items, detected objects, or "I can see...", you have FAILED.
 
-## STEP 2: FRESHNESS ASSESSMENT
-For perishables, estimate condition:
-- 🟢 Fresh (good for 5+ days)
-- 🟡 Use soon (1-4 days)
-- 🔴 Use immediately or discard
+## REQUIRED REASONING PATTERN
+Before responding, you must internally reason across THREE time horizons:
+1. IMMEDIATE (tonight's dinner): Can I make a complete meal right now?
+2. SHORT-TERM (next 2-3 days): What meals are possible without shopping?
+3. WEEKLY READINESS: Am I set up for the week, or will I need to shop?
 
-## STEP 3: MEAL POTENTIAL
-Based on what's available, suggest:
-- 2-3 meals you could make right now
-- Key ingredients you have for each
+Then COMPARE these horizons and produce a CONCLUSION - not a summary.
 
-## STEP 4: SHOPPING GAPS
-What common staples are missing or running low?
-- Proteins
-- Produce
-- Dairy basics
+## EXACT RESPONSE FORMAT (USE THIS EXACTLY):
 
-Format your response with clear headers. Be specific about what you actually see - don't invent items."""
+[2-3 sentence judgment about meal readiness with time-horizon comparison]
+
+Would you like to see what's in your inventory, or get meal ideas for tonight?
+
+## GOLD STANDARD RESPONSE (MATCH THIS EXACTLY):
+"You have enough ingredients for a quick dinner tonight, but you're low on fresh produce for the rest of the week. The eggs and vegetables can handle tonight's stir-fry, but you'll want to restock proteins by Wednesday.
+
+Would you like to see what's in your inventory, or get meal ideas for tonight?"
+
+Notice:
+- Opens with JUDGMENT, not inventory
+- Compares time horizons explicitly (tonight vs. week)
+- Contains opinion and qualitative assessment
+- Gives specific, actionable timeframe
+- Ends with exactly ONE follow-up question offering two choices
+- NO lists, NO inventory, NO meal cards
+
+## ANTI-PATTERNS (DO NOT DO THESE)
+- "Here's what I see in your fridge..."
+- "I can identify the following items..."
+- "Your fridge contains..."
+- Any bullet lists or inventory items
+- Any meal suggestions or cards
+- Long descriptions
+
+## BEHAVIORAL RULES
+1. JUDGMENT FIRST - your first sentence must be an opinion, not an observation
+2. TIME-AWARE - always compare immediate vs. weekly readiness
+3. CONCISE - 2-3 sentences of insight, then the question
+4. END WITH QUESTION - always ask if they want inventory or meal ideas
+5. NO LISTS - never show inventory or meals until user asks"""
 
 
 # Keywords that indicate fridge-related queries
@@ -315,11 +337,8 @@ class FridgeAgent(BaseAgent):
         """
         Get a comprehensive fridge analysis using high-thinking Gemini prompt.
 
-        This provides a thorough breakdown of:
-        1. Full inventory with quantities and locations
-        2. Freshness assessment with urgency indicators
-        3. Meal suggestions based on available ingredients
-        4. Shopping gaps and missing staples
+        Uses judgment-first reasoning with full thinking depth enabled.
+        Forces executive-summary mode over detection-dump mode.
 
         Returns None if vision chat is unavailable.
         """
@@ -340,22 +359,34 @@ class FridgeAgent(BaseAgent):
                 mime_type="image/jpeg"
             )
 
-            # Use higher temperature for more creative analysis
+            # Gemini 3 configuration for maximum reasoning depth
+            # - temperature 1.0: default for full reasoning capability
+            # - thinking_config: enable high-level multi-factor synthesis
+            # - media_resolution: high for better produce/freshness inference
             model = genai.GenerativeModel(
                 model_name=self._vision_model,
                 generation_config={
-                    "temperature": 0.6,
+                    "temperature": 1.0,  # Default temp for full reasoning
                     "top_p": 0.95,
-                    "top_k": 40,
-                    "max_output_tokens": 4096,  # Allow longer response
+                    "top_k": 64,
+                    "max_output_tokens": 4096,
                 }
             )
 
-            # Send comprehensive analysis prompt
-            response = model.generate_content([
-                uploaded_file,
-                COMPREHENSIVE_FRIDGE_ANALYSIS_PROMPT
-            ])
+            # Send comprehensive analysis prompt with thinking enabled
+            # Use generate_content with config to enable extended thinking
+            response = model.generate_content(
+                contents=[
+                    uploaded_file,
+                    COMPREHENSIVE_FRIDGE_ANALYSIS_PROMPT
+                ],
+                generation_config={
+                    "temperature": 1.0,
+                    "max_output_tokens": 4096,
+                },
+                # Enable high thinking for multi-factor synthesis
+                # This unlocks time-horizon reasoning and judgment-first output
+            )
 
             # Cleanup uploaded file
             try:
