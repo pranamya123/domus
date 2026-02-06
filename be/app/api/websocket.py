@@ -39,7 +39,7 @@ BAKE_SALE_NOTIFICATION_DELAY_SECONDS = 180  # 3 minutes after app open
 
 # TODO: For demo only - triggers grocery store notification 7 minutes after app open.
 # In production, this would be triggered by actual iOS geofence entry via POST /location/entered.
-GROCERY_NOTIFICATION_DELAY_SECONDS = 420  # 7 minutes after app open
+GROCERY_NOTIFICATION_DELAY_SECONDS = 30  # 30 seconds after app open (was 420 = 7 min)
 
 
 class WebSocketManager:
@@ -87,13 +87,15 @@ class WebSocketManager:
                 self._delayed_bake_sale_check(user_id, session)
             )
 
-        # Schedule delayed grocery store notification (7 minutes after connect)
+        # Schedule delayed grocery store notification (30 seconds after connect for demo)
         # TODO: For demo only - simulates user entering a grocery store.
         # In production, this would be triggered by iOS geofence entry via POST /location/entered.
         if user_id not in self._grocery_notified:
+            logger.info("Creating grocery notification task for user %s", user_id)
             self._grocery_tasks[user_id] = asyncio.create_task(
                 self._delayed_grocery_check(user_id, session)
             )
+            logger.info("Grocery notification task created for user %s", user_id)
 
     async def disconnect(self, user_id: str) -> None:
         """Clean up on disconnect."""
@@ -117,6 +119,8 @@ class WebSocketManager:
 
         This ensures notifications created while user was backgrounded
         are delivered when they return to the app.
+
+        NOTE: Only sends ONE bake sale notification to avoid duplicates.
         """
         try:
             notifications = await self._storage.state.get_notifications(user_id, limit=10)
@@ -125,9 +129,26 @@ class WebSocketManager:
             if not unread:
                 return
 
-            logger.info("Sending %d pending notifications to user %s", len(unread), user_id)
+            # Filter: only send ONE bake sale notification (the most recent one)
+            bake_sale_sent = False
+            filtered_unread = []
+            for n in unread:
+                title_lower = n.title.lower() if n.title else ""
+                is_bake_sale = "bake" in title_lower or "baking" in title_lower
+                if is_bake_sale:
+                    if not bake_sale_sent:
+                        filtered_unread.append(n)
+                        bake_sale_sent = True
+                    # Skip additional bake sale notifications
+                else:
+                    filtered_unread.append(n)
 
-            for notification in unread:
+            if not filtered_unread:
+                return
+
+            logger.info("Sending %d pending notifications to user %s", len(filtered_unread), user_id)
+
+            for notification in filtered_unread:
                 event = DomusEvent(
                     type=EventType.NOTIFICATION_CREATED,
                     payload={

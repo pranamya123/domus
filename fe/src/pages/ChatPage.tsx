@@ -17,7 +17,7 @@ const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}
 
 // Agent detection keywords
 const AGENT_KEYWORDS: Record<string, string[]> = {
-  DFridge: ['fridge', 'refrigerator', 'food', 'groceries', 'ingredients', 'expired', 'expiring', 'milk', 'eggs', 'vegetables', 'fruits', 'meat', 'leftovers'],
+  DFridge: ['fridge', 'refrigerator', 'food', 'groceries', 'ingredients', 'expired', 'expiring', 'milk', 'eggs', 'vegetables', 'fruits', 'meat', 'leftovers', 'eat', 'meal', 'cheap', 'budget', 'cook', 'dinner', 'lunch', 'breakfast'],
   DCalendar: ['calendar', 'schedule', 'meeting', 'appointment', 'event', 'reminder', 'today', 'tomorrow', 'week'],
   DEnergy: ['energy', 'electricity', 'power', 'bill', 'usage', 'consumption', 'solar', 'thermostat', 'temperature'],
   DSecurity: ['security', 'camera', 'lock', 'door', 'alarm', 'motion', 'intruder'],
@@ -37,12 +37,39 @@ function detectAgent(message: string): string | null {
 // Blink connection flow steps
 type BlinkStep = 'none' | 'connect' | 'login' | '2fa' | 'success';
 
-// Order card state
-interface OrderCard {
+// Action card state - supports both bake sale (Instacart) and in-store assist
+type CardType = 'bake_sale' | 'in_store_assist';
+interface ActionCard {
   id: string;
+  type: CardType;
   items: string[];
-  status: 'pending' | 'approved' | 'ignored';
+  status: 'pending' | 'approved' | 'picked_up' | 'ignored';
+  storeName?: string;
 }
+
+// Shopping context for conversational continuity (ephemeral, task-scoped)
+interface ShoppingContext {
+  storeName: string;
+  item: string;
+  section: string;  // e.g., "dairy section near the back"
+  timestamp: number;
+}
+
+// Item to store section mapping (for contextual responses)
+const ITEM_SECTIONS: Record<string, string> = {
+  milk: 'dairy section near the back',
+  eggs: 'dairy section',
+  butter: 'dairy section',
+  cheese: 'dairy section',
+  yogurt: 'dairy section',
+  bread: 'bakery section',
+  produce: 'produce section',
+  vegetables: 'produce section',
+  fruits: 'produce section',
+  meat: 'meat section',
+  chicken: 'meat section',
+  fish: 'seafood section',
+};
 
 export function ChatPage() {
   const [inputValue, setInputValue] = useState('');
@@ -57,7 +84,8 @@ export function ChatPage() {
   const [blinkLoading, setBlinkLoading] = useState(false);
   const [showMediaPreview, setShowMediaPreview] = useState(false);
   const [mediaTimestamp, setMediaTimestamp] = useState(Date.now());
-  const [orderCards, setOrderCards] = useState<OrderCard[]>([]);
+  const [actionCards, setActionCards] = useState<ActionCard[]>([]);
+  const [shoppingContext, setShoppingContext] = useState<ShoppingContext | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const user = useStore((state) => state.user);
@@ -77,8 +105,14 @@ export function ChatPage() {
   const { blinkLogin, blinkVerify, token, fetchNotifications, resolveNotificationToChat } = useApi();
 
   // Add initial greeting message from Domus on first load
+  // BUT skip if user entered from notification tap (pendingOrderCard is set)
   const [hasGreeted, setHasGreeted] = useState(false);
   useEffect(() => {
+    // Don't show greeting if entered from notification (pendingOrderCard exists)
+    if (pendingOrderCard) {
+      setHasGreeted(true);  // Mark as greeted to prevent future greeting
+      return;
+    }
     if (!hasGreeted && messages.length === 0) {
       setHasGreeted(true);
       // Add greeting immediately
@@ -89,14 +123,15 @@ export function ChatPage() {
         timestamp: new Date().toISOString(),
       });
     }
-  }, [hasGreeted, messages.length, addMessage]);
+  }, [hasGreeted, messages.length, addMessage, pendingOrderCard]);
 
   // Handle pending order card from iOS notification tap (set by App.tsx)
   useEffect(() => {
     if (pendingOrderCard) {
       console.log('[ChatPage] Processing pending order card:', pendingOrderCard);
-      setOrderCards(prev => [...prev, {
+      setActionCards(prev => [...prev, {
         id: pendingOrderCard.id,
+        type: 'bake_sale',  // Default to bake sale for iOS notification tap
         items: pendingOrderCard.items,
         status: 'pending',
       }]);
@@ -137,11 +172,111 @@ export function ChatPage() {
   const handleSend = () => {
     if (!inputValue.trim() || isAgentActivating || isThinking) return;
 
-    const detectedAgent = detectAgent(inputValue);
+    const userInput = inputValue.trim();
+    const inputLower = userInput.toLowerCase();
+
+    // Check if user is responding to an action card
+    const affirmatives = ['yes', 'yes!', 'yeah', 'yep', 'sure', 'yes sure', 'yes sure!', 'ok', 'okay', 'please', 'do it', 'go ahead', 'add it', 'add to list'];
+    const negatives = ['no', 'no thanks', 'nope', 'not now', 'later', 'skip', 'ignore', 'nevermind', 'never mind'];
+    const pickedUp = ['picked up', 'got it', 'already got it', 'i got it', 'grabbed it'];
+
+    const isAffirmative = affirmatives.includes(inputLower) || inputLower.startsWith('yes');
+    const isNegative = negatives.includes(inputLower) || inputLower.startsWith('no ');
+    const isPickedUp = pickedUp.some(p => inputLower.includes(p));
+
+    // Find pending action card (in-store assist or bake sale)
+    const pendingCard = actionCards.find(c => c.status === 'pending');
+
+    if (pendingCard && (isAffirmative || isNegative || isPickedUp)) {
+      // Handle response to action card locally (don't send to orchestrator)
+      addMessage({
+        id: `user-${Date.now()}`,
+        content: userInput,
+        sender: 'user',
+        timestamp: new Date().toISOString(),
+      });
+
+      if (isNegative) {
+        // User declined - dismiss card with friendly acknowledgment
+        handleCardIgnore(pendingCard.id);
+        setShoppingContext(null);  // Clear shopping context
+        addMessage({
+          id: `dismiss-${pendingCard.id}`,
+          content: "No problem!",
+          sender: 'domus',
+          timestamp: new Date().toISOString(),
+        });
+      } else if (isPickedUp && pendingCard.type === 'in_store_assist') {
+        // User said they picked it up
+        handlePickedUp(pendingCard.id, pendingCard.items[0]);
+      } else if (isAffirmative) {
+        if (pendingCard.type === 'in_store_assist') {
+          handleAddToList(pendingCard.id, pendingCard.items[0]);
+        } else if (pendingCard.type === 'bake_sale') {
+          handleBakeSaleApprove(pendingCard.id);
+        }
+      }
+
+      setInputValue('');
+      return;
+    }
+
+    // Handle follow-up questions within shopping context (ephemeral, task-scoped)
+    // Context expires after 10 minutes or when user leaves the store flow
+    const contextActive = shoppingContext && (Date.now() - shoppingContext.timestamp < 10 * 60 * 1000);
+
+    if (contextActive) {
+      // Detect shopping context follow-ups
+      const anythingElse = ['anything else', 'what else', 'something else', 'other items', 'low on'];
+      const whereExactly = ['where exactly', 'where is', 'which aisle', 'find it', 'where can i find'];
+      const alreadyGotIt = ['already picked', 'already got', 'i got it', 'picked it up', 'grabbed it'];
+      const thanksDone = ['thanks', 'thank you', 'thats all', "that's all", 'done', 'all good', 'all set'];
+
+      const isAnythingElse = anythingElse.some(p => inputLower.includes(p));
+      const isWhereExactly = whereExactly.some(p => inputLower.includes(p));
+      const isAlreadyGotIt = alreadyGotIt.some(p => inputLower.includes(p));
+      const isThanksDone = thanksDone.some(p => inputLower.includes(p));
+
+      if (isAnythingElse || isWhereExactly || isAlreadyGotIt || isThanksDone) {
+        // Handle locally without orchestrator reset
+        addMessage({
+          id: `user-${Date.now()}`,
+          content: userInput,
+          sender: 'user',
+          timestamp: new Date().toISOString(),
+        });
+
+        let response = '';
+        if (isWhereExactly) {
+          response = `${shoppingContext.item.charAt(0).toUpperCase() + shoppingContext.item.slice(1)} should be in the ${shoppingContext.section} at ${shoppingContext.storeName}.`;
+        } else if (isAlreadyGotIt) {
+          response = `Got it — ${shoppingContext.item} checked off. Let me know if there's anything else.`;
+          setShoppingContext(null);  // Clear context
+        } else if (isAnythingElse) {
+          response = `Based on what I can see, you're good on most staples. I'll let you know if something else comes up.`;
+        } else if (isThanksDone) {
+          response = `Happy shopping!`;
+          setShoppingContext(null);  // Clear context
+        }
+
+        addMessage({
+          id: `followup-${Date.now()}`,
+          content: response,
+          sender: 'domus',
+          timestamp: new Date().toISOString(),
+        });
+
+        setInputValue('');
+        return;
+      }
+    }
+
+    // Normal message flow
+    const detectedAgent = detectAgent(userInput);
 
     addMessage({
       id: `user-${Date.now()}`,
-      content: inputValue,
+      content: userInput,
       sender: 'user',
       timestamp: new Date().toISOString(),
       status: 'sending',
@@ -155,7 +290,7 @@ export function ChatPage() {
       setActivatingAgent(detectedAgent);
     }
 
-    sendMessage(inputValue);
+    sendMessage(userInput);
     setInputValue('');
   };
 
@@ -257,19 +392,45 @@ export function ChatPage() {
         fromNotification: true,
       });
 
-      // For proactive notifications with missing items, show order card
+      // For proactive notifications, show appropriate action card
       if (notification.notification_type === 'proactive') {
-        // Extract items from notification body (e.g., "missing: flour, sugar, vanilla")
+        const titleLower = notification.title.toLowerCase();
         const bodyLower = notification.body.toLowerCase();
-        const missingMatch = bodyLower.match(/missing[:\s]+([^.]+)/);
-        if (missingMatch) {
-          const items = missingMatch[1].split(',').map(s => s.trim()).filter(Boolean);
-          if (items.length > 0) {
-            setOrderCards(prev => [...prev, {
+
+        // Detect in-store assist (grocery) notification
+        if (titleLower.includes("noticed you're at")) {
+          // Extract item from body (e.g., "You're out of milk" or "Running low on eggs")
+          const outMatch = bodyLower.match(/out of (\w+)/);
+          const lowMatch = bodyLower.match(/low on (\w+)/);
+          const item = outMatch?.[1] || lowMatch?.[1];
+
+          if (item) {
+            // Extract store name from title (e.g., "Noticed you're at Whole Foods")
+            const storeMatch = notification.title.match(/at (.+)$/);
+            const storeName = storeMatch?.[1] || 'the store';
+
+            setActionCards(prev => [...prev, {
               id: notification.notification_id,
-              items,
+              type: 'in_store_assist',
+              items: [item],
               status: 'pending',
+              storeName,
             }]);
+          }
+        }
+        // Detect bake sale notification (missing: item1, item2)
+        else {
+          const missingMatch = bodyLower.match(/missing[:\s]+([^.]+)/);
+          if (missingMatch) {
+            const items = missingMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+            if (items.length > 0) {
+              setActionCards(prev => [...prev, {
+                id: notification.notification_id,
+                type: 'bake_sale',
+                items,
+                status: 'pending',
+              }]);
+            }
           }
         }
       }
@@ -281,27 +442,90 @@ export function ChatPage() {
     }
   };
 
-  // Handle order card approve
-  const handleOrderApprove = (cardId: string) => {
-    setOrderCards(prev => prev.map(card =>
+  // Handle bake sale card approve (Instacart order)
+  const handleBakeSaleApprove = (cardId: string) => {
+    setActionCards(prev => prev.map(card =>
       card.id === cardId ? { ...card, status: 'approved' as const } : card
     ));
-    // Mock Instacart order
     addMessage({
       id: `order-${cardId}`,
       content: 'Order placed with Instacart. Your items will arrive soon.',
       sender: 'domus',
       timestamp: new Date().toISOString(),
     });
-    // Auto-remove after 3 seconds
     setTimeout(() => {
-      setOrderCards(prev => prev.filter(card => card.id !== cardId));
+      setActionCards(prev => prev.filter(card => card.id !== cardId));
     }, 3000);
   };
 
-  // Handle order card ignore
-  const handleOrderIgnore = (cardId: string) => {
-    setOrderCards(prev => prev.filter(card => card.id !== cardId));
+  // Handle in-store assist "Picked Up" action
+  const handlePickedUp = (cardId: string, item: string) => {
+    const card = actionCards.find(c => c.id === cardId);
+    const storeName = card?.storeName || 'the store';
+
+    setActionCards(prev => prev.map(c =>
+      c.id === cardId ? { ...c, status: 'picked_up' as const } : c
+    ));
+
+    // Set shopping context for follow-up questions
+    const section = ITEM_SECTIONS[item.toLowerCase()] || 'the store';
+    setShoppingContext({
+      storeName,
+      item,
+      section,
+      timestamp: Date.now(),
+    });
+
+    // Contextual confirmation
+    addMessage({
+      id: `picked-${cardId}`,
+      content: `Got it — ${item} checked off. Let me know if there's anything else while you're here.`,
+      sender: 'domus',
+      timestamp: new Date().toISOString(),
+    });
+
+    setTimeout(() => {
+      setActionCards(prev => prev.filter(c => c.id !== cardId));
+    }, 2000);
+  };
+
+  // Handle in-store assist "Add to List" action
+  const handleAddToList = (cardId: string, item: string) => {
+    const card = actionCards.find(c => c.id === cardId);
+    const storeName = card?.storeName || 'the store';
+
+    setActionCards(prev => prev.map(c =>
+      c.id === cardId ? { ...c, status: 'approved' as const } : c
+    ));
+
+    // Get store section for item
+    const section = ITEM_SECTIONS[item.toLowerCase()] || 'the store';
+
+    // Set shopping context for follow-up questions
+    setShoppingContext({
+      storeName,
+      item,
+      section,
+      timestamp: Date.now(),
+    });
+
+    // Contextual confirmation with helpful follow-up
+    const capitalizedItem = item.charAt(0).toUpperCase() + item.slice(1);
+    addMessage({
+      id: `list-${cardId}`,
+      content: `Done. ${capitalizedItem}'s usually in the ${section} — I can help you find it, or check if there's anything else you're low on while you're here.`,
+      sender: 'domus',
+      timestamp: new Date().toISOString(),
+    });
+
+    setTimeout(() => {
+      setActionCards(prev => prev.filter(c => c.id !== cardId));
+    }, 2000);
+  };
+
+  // Handle card ignore/dismiss
+  const handleCardIgnore = (cardId: string) => {
+    setActionCards(prev => prev.filter(card => card.id !== cardId));
   };
 
   // Handle scan button - open camera
@@ -657,8 +881,9 @@ export function ChatPage() {
                             components={{
                               p: ({ children }) => <p style={styles.mdParagraph}>{children}</p>,
                               strong: ({ children }) => <strong style={styles.mdStrong}>{children}</strong>,
+                              em: ({ children }) => <em style={styles.mdEmphasis}>{children}</em>,
                               ul: ({ children }) => <ul style={styles.mdList}>{children}</ul>,
-                              ol: ({ children }) => <ol style={styles.mdList}>{children}</ol>,
+                              ol: ({ children }) => <ol style={styles.mdOrderedList}>{children}</ol>,
                               li: ({ children }) => <li style={styles.mdListItem}>{children}</li>,
                               h1: ({ children }) => <h1 style={styles.mdH1}>{children}</h1>,
                               h2: ({ children }) => <h2 style={styles.mdH2}>{children}</h2>,
@@ -688,10 +913,11 @@ export function ChatPage() {
                 </span>
               </div>
             )}
-            {/* Order Cards */}
-            {orderCards.map((card) => (
+            {/* Action Cards - Bake Sale (Instacart) or In-Store Assist */}
+            {actionCards.map((card) => (
               <div key={card.id} style={styles.orderCard}>
-                {card.status === 'approved' ? (
+                {/* Success states */}
+                {card.status === 'approved' && card.type === 'bake_sale' && (
                   <div style={styles.orderCardApproved}>
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
                       <circle cx="12" cy="12" r="10" fill="#034F03"/>
@@ -699,7 +925,28 @@ export function ChatPage() {
                     </svg>
                     <span style={styles.orderCardApprovedText}>Order placed</span>
                   </div>
-                ) : (
+                )}
+                {card.status === 'picked_up' && (
+                  <div style={styles.orderCardApproved}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" fill="#034F03"/>
+                      <path d="M8 12L11 15L16 9" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={styles.orderCardApprovedText}>Picked up</span>
+                  </div>
+                )}
+                {card.status === 'approved' && card.type === 'in_store_assist' && (
+                  <div style={styles.orderCardApproved}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" fill="#034F03"/>
+                      <path d="M8 12L11 15L16 9" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={styles.orderCardApprovedText}>Added to list</span>
+                  </div>
+                )}
+
+                {/* Pending states */}
+                {card.status === 'pending' && card.type === 'bake_sale' && (
                   <>
                     <p style={styles.orderCardText}>
                       Missing: <strong>{card.items.join(', ')}</strong>
@@ -708,15 +955,38 @@ export function ChatPage() {
                     <div style={styles.orderCardButtons}>
                       <button
                         style={styles.orderCardIgnoreBtn}
-                        onClick={() => handleOrderIgnore(card.id)}
+                        onClick={() => handleCardIgnore(card.id)}
                       >
                         Ignore
                       </button>
                       <button
                         style={styles.orderCardApproveBtn}
-                        onClick={() => handleOrderApprove(card.id)}
+                        onClick={() => handleBakeSaleApprove(card.id)}
                       >
                         Approve
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* In-Store Assist Card */}
+                {card.status === 'pending' && card.type === 'in_store_assist' && (
+                  <>
+                    <p style={styles.orderCardText}>
+                      <strong>{card.items[0]}</strong>
+                    </p>
+                    <div style={styles.orderCardButtons}>
+                      <button
+                        style={styles.orderCardIgnoreBtn}
+                        onClick={() => handleAddToList(card.id, card.items[0])}
+                      >
+                        Add to List
+                      </button>
+                      <button
+                        style={styles.orderCardApproveBtn}
+                        onClick={() => handlePickedUp(card.id, card.items[0])}
+                      >
+                        Picked Up
                       </button>
                     </div>
                   </>
@@ -1022,7 +1292,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'flex-start',
+    justifyContent: 'flex-end',
     alignItems: 'stretch',
     padding: '12px 16px',
     overflow: 'auto',
@@ -1102,7 +1372,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   domusMessage: {
     backgroundColor: '#DAF7DA',
     borderRadius: '16px',
-    padding: '12px 16px',
+    padding: '14px 18px',
     maxWidth: '100%',
   },
   domusFridgeMessage: {
@@ -1315,9 +1585,10 @@ const styles: { [key: string]: React.CSSProperties } = {
     borderRadius: '12px',
     padding: '16px',
     marginTop: '12px',
+    marginLeft: '42px',  // Align with chat bubble (avatar 32px + gap 10px)
     boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
     border: '1px solid #E8F5E9',
-    width: '100%',
+    width: 'calc(100% - 42px)',
     maxWidth: '300px',
     alignSelf: 'flex-start',
   },
@@ -1374,52 +1645,66 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontWeight: 500,
     color: '#034F03',
   },
-  // Markdown styles for assistant messages
+  // Markdown styles for assistant messages - clean, readable typography
   markdownContainer: {
     fontFamily: '"Roboto", sans-serif',
-    fontSize: '14px',
-    color: '#000000',
-    lineHeight: 1.5,
+    fontSize: '15px',
+    color: '#1a1a1a',
+    lineHeight: 1.6,
+    letterSpacing: '-0.01em',
   },
   mdParagraph: {
-    margin: '0 0 8px 0',
-    lineHeight: 1.5,
+    margin: '0 0 12px 0',
+    lineHeight: 1.6,
   },
   mdStrong: {
     fontWeight: 600,
-    color: '#034F03',
+    color: '#1a1a1a',
   },
   mdList: {
-    margin: '4px 0 8px 0',
+    margin: '10px 0 14px 0',
     paddingLeft: '20px',
+    listStyleType: 'disc',
+  },
+  mdOrderedList: {
+    margin: '10px 0 14px 0',
+    paddingLeft: '22px',
+    listStyleType: 'decimal',
   },
   mdListItem: {
-    margin: '4px 0',
-    lineHeight: 1.4,
+    margin: '8px 0',
+    lineHeight: 1.55,
+    paddingLeft: '6px',
   },
   mdH1: {
-    fontSize: '18px',
+    fontSize: '17px',
     fontWeight: 600,
-    margin: '0 0 8px 0',
-    color: '#000000',
+    margin: '0 0 10px 0',
+    color: '#1a1a1a',
+    letterSpacing: '-0.02em',
   },
   mdH2: {
     fontSize: '16px',
     fontWeight: 600,
-    margin: '12px 0 6px 0',
-    color: '#333333',
+    margin: '18px 0 10px 0',
+    color: '#1a1a1a',
+    letterSpacing: '-0.01em',
   },
   mdH3: {
-    fontSize: '14px',
+    fontSize: '15px',
     fontWeight: 600,
-    margin: '10px 0 4px 0',
+    margin: '16px 0 8px 0',
     color: '#333333',
   },
   mdCode: {
-    backgroundColor: '#f0f0f0',
-    padding: '2px 6px',
-    borderRadius: '4px',
+    backgroundColor: '#f5f5f5',
+    padding: '3px 8px',
+    borderRadius: '6px',
     fontFamily: 'monospace',
     fontSize: '13px',
+  },
+  mdEmphasis: {
+    fontStyle: 'italic',
+    color: '#555555',
   },
 };

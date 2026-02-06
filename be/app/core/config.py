@@ -43,8 +43,8 @@ class Settings(BaseSettings):
 
     # Gemini LLM
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-2.5-flash"
-    gemini_vision_model: str = "gemini-2.5-flash"  # Multimodal model for fridge analysis
+    gemini_model: str = "gemini-3-flash-preview"
+    gemini_vision_model: str = "gemini-3-flash-preview"  # Multimodal model for fridge analysis
 
     # CORS
     cors_origins: list[str] = [

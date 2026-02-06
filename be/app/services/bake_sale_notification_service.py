@@ -3,10 +3,12 @@ Bake Sale Notification Service - Feature 2: "Bake Sale Prep, Handled"
 
 Generates rich notifications with pre-seeded chat content for bake sale events.
 This service is responsible for:
-- Analyzing fridge contents vs. required ingredients
+- Analyzing fridge contents vs. common baking staples
 - Generating the full chat message (not just push text)
-- Including recipe suggestions and action cards
+- Including action cards for ordering missing items
 - Sending push notification (works when app is backgrounded)
+
+HARD CONSTRAINT: If no specific recipe is known, never imply that a recipe has been selected.
 """
 
 import logging
@@ -23,24 +25,16 @@ logger = logging.getLogger(__name__)
 # Media storage path for thumbnail
 MEDIA_DIR = Path(__file__).resolve().parent.parent / "storage" / "media"
 
-# Default recipe for bake sales
-CHOCOLATE_CHIP_COOKIES_RECIPE = {
-    "name": "Classic Chocolate Chip Cookies",
-    "prep_time": "15 minutes",
-    "cook_time": "12 minutes",
-    "makes": "24 cookies",
-    "ingredients": [
-        "2 1/4 cups flour",
-        "1 cup butter, softened",
-        "3/4 cup sugar",
-        "3/4 cup brown sugar",
-        "2 eggs",
-        "1 tsp vanilla extract",
-        "1 tsp baking soda",
-        "1 tsp salt",
-        "2 cups chocolate chips"
-    ]
-}
+# Generic baking staples used for bake sale events when no specific recipe is known
+# These are common ingredients that most bake sale recipes require
+GENERIC_BAKING_STAPLES = [
+    "flour",
+    "sugar",
+    "butter",
+    "eggs",
+    "baking powder",
+    "vanilla extract",
+]
 
 
 class BakeSaleNotificationService:
@@ -49,10 +43,11 @@ class BakeSaleNotificationService:
 
     When user taps the notification, they see a complete chat message with:
     - Event summary and urgency
-    - Items they have (from fridge)
-    - Items they need to get
-    - Recipe suggestion
+    - Common baking staples they may need
     - Action card for ordering missing items
+
+    NOTE: This service uses generic baking staples, not specific recipes.
+    If no specific recipe is known, we never imply that one has been selected.
     """
 
     def __init__(self, storage):
@@ -83,8 +78,9 @@ class BakeSaleNotificationService:
             if event_time:
                 event_dt = datetime.fromisoformat(event_time)
                 time_str = event_dt.strftime("%A at %I:%M %p")
-                days_until = (event_dt - datetime.now()).days
-                if days_until == 0:
+                # Compare dates (not datetimes) to get correct day difference
+                days_until = (event_dt.date() - datetime.now().date()).days
+                if days_until <= 0:
                     urgency = "today"
                 elif days_until == 1:
                     urgency = "tomorrow"
@@ -118,6 +114,14 @@ class BakeSaleNotificationService:
             # Create action card data for ordering
             action_card = self._create_order_action_card(items_need)
 
+            # Check if notification already exists for this event (survives server restart)
+            idempotency_key = f"bake_sale_{event.get('id')}_{user_id}"
+            existing_notifications = await self._storage.state.get_notifications(user_id, limit=50)
+            for n in existing_notifications:
+                if n.idempotency_key == idempotency_key:
+                    logger.debug("Bake sale notification already exists for this event")
+                    return None
+
             # Create notification record
             notification_id = uuid4()
             notification_record = NotificationRecord(
@@ -128,14 +132,8 @@ class BakeSaleNotificationService:
                 notification_type="proactive",
                 chat_seed_content=chat_seed_content,
                 event_id=event.get("id"),
-                idempotency_key=f"bake_sale_{event.get('id')}_{user_id}",
+                idempotency_key=idempotency_key,
             )
-
-            # Check idempotency before saving
-            existing = await self._check_idempotency(notification_record.idempotency_key)
-            if existing:
-                logger.debug("Notification already sent for this event")
-                return None
 
             # Save to storage
             await self._storage.state.save_notification(notification_record)
@@ -255,16 +253,20 @@ class BakeSaleNotificationService:
         return items_have, items_need
 
     def _generate_short_body(self, items_need: list[str], urgency: str) -> str:
-        """Generate short push notification body."""
+        """
+        Generate short push notification body.
+
+        IMPORTANT: Include "missing:" format so frontend can parse items for order card.
+        """
         if not items_need:
             return f"You're all set for the bake sale {urgency}!"
 
-        if len(items_need) == 1:
-            return f"You're missing {items_need[0]}. Want me to help?"
-        elif len(items_need) <= 3:
-            return f"You're missing {', '.join(items_need[:2])}. Tap to prep."
-        else:
-            return f"You're missing {len(items_need)} items. Tap to see the list."
+        # Format items for frontend parsing (frontend looks for "missing: item1, item2")
+        items_str = ", ".join(items_need[:4])  # Limit to 4 items for brevity
+        if len(items_need) > 4:
+            items_str += f" (+{len(items_need) - 4} more)"
+
+        return f"Missing: {items_str}. Tap to order."
 
     def _generate_chat_seed_content(
         self,
@@ -277,64 +279,59 @@ class BakeSaleNotificationService:
         """
         Generate the full chat message that appears when notification is tapped.
 
-        Includes all required sections:
-        1. Summary/context message
-        2. Items you have
-        3. Items to get
-        4. Recipe suggestion
-        5. User-facing prompt
+        Structure (event-aware, multistep reasoning):
+        1. Contextual Acknowledgment - event + timing + constraint
+        2. Reasoned Assessment - probabilistic, helpful framing (NO recipe assumptions)
+        3. Missing Ingredients - clean, scannable list
+        4. Action-Oriented Close - single Instacart question
+
+        HARD CONSTRAINT: If no specific recipe is known, never imply that a recipe has been selected.
         """
         lines = []
 
-        # 1. Summary message
+        # 1. Contextual Acknowledgment (event + timing + constraint)
+        if urgency == "tomorrow":
+            constraint = "and your schedule looks packed today"
+        elif urgency == "today":
+            constraint = "and it's coming up fast"
+        else:
+            constraint = ""
+
         if items_need:
             lines.append(
-                f"You have **{event_title}** {urgency} and you're missing a few items "
-                f"for chocolate chip cookies."
+                f"I see you have a **{event_title.lower()}** {urgency}{', ' + constraint if constraint else ''}."
             )
         else:
             lines.append(
-                f"You have **{event_title}** {urgency} and you're all set! "
-                f"You have everything for chocolate chip cookies."
+                f"I see you have a **{event_title.lower()}** {urgency}. Good news - you look well stocked!"
             )
 
         lines.append("")
 
-        # 2. Items you have
-        lines.append("### ✅ Items you have")
-        if items_have:
-            for item in items_have:
-                lines.append(f"• {item}")
-        else:
-            lines.append("• (none of the required items found)")
-        lines.append("")
-
-        # 3. Items to get
-        lines.append("### 🛒 Items to get")
+        # 2. Reasoned Assessment (probabilistic framing - NO recipe assumptions)
         if items_need:
+            lines.append(
+                "For a typical bake sale, you're missing a few common baking staples."
+            )
+            lines.append("")
+
+            # 3. Missing Ingredients (clean, scannable list)
+            lines.append(f"**Common baking staples to pick up:**")
             for item in items_need:
                 lines.append(f"• {item}")
-        else:
-            lines.append("• (you have everything!)")
-        lines.append("")
+            lines.append("")
 
-        # 4. Recipe suggestion
-        recipe = CHOCOLATE_CHIP_COOKIES_RECIPE
-        lines.append(f"### 🍪 Recipe: {recipe['name']}")
-        lines.append(f"*Prep: {recipe['prep_time']} | Cook: {recipe['cook_time']} | Makes: {recipe['makes']}*")
-        lines.append("")
-
-        # 5. User-facing prompt
-        if items_need:
-            lines.append("---")
+            # 4. Action-Oriented Close (single Instacart question)
+            lines.append(
+                "Want me to order these from Instacart so they arrive in time?"
+            )
             lines.append("")
-            lines.append("**Want me to order what you'll need or schedule prep reminders?**")
-            lines.append("")
-            lines.append("<!-- ACTION_CARD:order_missing_items -->")
         else:
-            lines.append("---")
+            lines.append(
+                "You have the common baking staples covered. Ready to bake!"
+            )
             lines.append("")
-            lines.append("**Ready to start baking! Want me to set a reminder for when to start?**")
+            lines.append("Want me to set a reminder for when to start prepping?")
 
         return "\n".join(lines)
 

@@ -21,14 +21,55 @@ logger = logging.getLogger(__name__)
 MEDIA_DIR = Path(__file__).resolve().parent.parent / "storage" / "media"
 
 # Fridge-specific grounding for Gemini vision
-FRIDGE_IMAGE_SCOPE = (
-    "This image shows the items inside a refrigerator. "
-    "Answer questions with JUDGMENT, not just detection. "
-    "IMPORTANT: Lead with insight about meal readiness, not item lists. "
-    "Think about: Can they cook tonight? This week? What's urgent? "
-    "Keep responses SHORT and CRISP - focus on what matters. "
-    "Ignore refrigerator hardware and non-food items."
-)
+FRIDGE_IMAGE_SCOPE = """This image shows the items inside a refrigerator.
+Answer questions with JUDGMENT, not just detection.
+IMPORTANT: Lead with insight about meal readiness, not item lists.
+Think about: Can they cook tonight? This week? What's urgent?
+Keep responses SHORT and CRISP - focus on what matters.
+Ignore refrigerator hardware and non-food items.
+
+## MEAL OPTIONS FORMAT (CRITICAL - ALWAYS FOLLOW)
+When the user asks for meal ideas, meal options, or what they can cook:
+
+DO NOT present meals as paragraphs, numbered lists, or "Option 1/Option 2".
+DO NOT output only titles - each meal MUST include all four fields.
+
+ALWAYS output meals in this EXACT structured format:
+
+### MEALS
+- title: Veggie Omelette
+  time: 15 min total
+  servings: 2 servings
+  image_prompt: Photorealistic vegetable omelette with melted cheese and herbs, plated on white dish, natural lighting, clean background
+- title: Garden Salad
+  time: 10 min total
+  servings: 2 servings
+  image_prompt: Photorealistic fresh garden salad with mixed greens and cherry tomatoes, served in white bowl, natural lighting, clean background
+- title: Stir-Fry Bowl
+  time: 20 min total
+  servings: 4 servings
+  image_prompt: Photorealistic vegetable stir-fry over rice in ceramic bowl, natural lighting, clean background
+
+Rules:
+- Use the ### MEALS header exactly
+- Each meal must have: title, time, servings, image_prompt (all four required)
+- Title: 2-5 words, title case
+- Time: format as "X min total"
+- Servings: format as "X servings"
+- image_prompt: "Photorealistic [dish description], plated, natural lighting, clean background"
+- Maximum 3-5 meals
+- Indent time/servings/image_prompt under the title line
+
+You may include a brief 1-2 sentence intro before the ### MEALS section.
+You may include a 1-sentence follow-up question after.
+
+FORBIDDEN:
+- Plain text meal titles without time/servings/image_prompt
+- "Option 1:", "Option 2:"
+- Cost/effort/tradeoff text
+- Ingredient lists
+- Long descriptions
+- Paragraphs of meal options"""
 
 # Comprehensive analysis prompt for "What's in my fridge, really?" queries
 # JUDGMENT-FIRST reasoning prompt with progressive disclosure
@@ -81,6 +122,75 @@ Notice:
 5. NO LISTS - never show inventory or meals until user asks"""
 
 
+# Budget optimization prompt for "What's the cheapest way to eat this week?"
+# DECISIVE, single-recommendation style with card-ready meal output
+BUDGET_OPTIMIZATION_PROMPT = """You are a calm, experienced friend who's good at budgeting. The user wants to know the cheapest way to eat this week based on what's in their fridge.
+
+## HARD CONSTRAINTS (VIOLATION = FAILURE)
+1. Do NOT use "Option 1", "Option 2", etc.
+2. Do NOT show cost ranges, effort levels, or tradeoff tables
+3. Do NOT use emojis, stars, or ratings
+4. Do NOT output plain text meal titles - each meal MUST include all four fields
+
+## EXACT RESPONSE STRUCTURE:
+
+**Part 1: Brief Insight (2-3 sentences)**
+A confident judgment about their budget situation and what strategy works best.
+
+**Part 2: Meal Cards (REQUIRED FORMAT)**
+### MEALS
+- title: Veggie Omelette
+  time: 15 min total
+  servings: 2 servings
+  image_prompt: Photorealistic vegetable omelette with melted cheese, plated on white dish, natural lighting, clean background
+- title: Egg Fried Rice
+  time: 20 min total
+  servings: 4 servings
+  image_prompt: Photorealistic egg fried rice with vegetables in ceramic bowl, natural lighting, clean background
+
+Rules for meals:
+- Use the ### MEALS header exactly
+- Each meal MUST have: title, time, servings, image_prompt (all four required)
+- Title: 2-5 words, title case
+- Time: format as "X min total"
+- Servings: format as "X servings"
+- image_prompt: "Photorealistic [dish], plated, natural lighting, clean background"
+- 3-5 meals maximum
+
+**Part 3: Follow-up (1 sentence)**
+Ask if they want a shopping list or more details.
+
+## GOLD STANDARD RESPONSE:
+"You can eat well this week for under $10 using what you already have - eggs, vegetables, and cheese are your foundation.
+
+### MEALS
+- title: Veggie Omelette
+  time: 15 min total
+  servings: 2 servings
+  image_prompt: Photorealistic vegetable omelette with herbs and cheese, plated, natural lighting, clean background
+- title: Garden Salad
+  time: 10 min total
+  servings: 2 servings
+  image_prompt: Photorealistic fresh garden salad with mixed greens, served in white bowl, natural lighting, clean background
+- title: Cheese Quesadilla
+  time: 15 min total
+  servings: 2 servings
+  image_prompt: Photorealistic cheese quesadilla cut into triangles on plate, natural lighting, clean background
+- title: Stir-Fry Bowl
+  time: 20 min total
+  servings: 4 servings
+  image_prompt: Photorealistic vegetable stir-fry over rice in bowl, natural lighting, clean background
+
+Want me to make a shopping list for anything extra?"
+
+## FORBIDDEN:
+- Plain text titles without time/servings/image_prompt
+- "Option 1:", "Option 2:"
+- Cost/effort/tradeoff breakdowns
+- Ingredient lists
+- Paragraphs listing meals"""
+
+
 # Keywords that indicate fridge-related queries
 FRIDGE_KEYWORDS = [
     'fridge', 'refrigerator', 'food', 'groceries', 'ingredients',
@@ -113,7 +223,7 @@ class FridgeAgent(BaseAgent):
         # Gemini vision chat state
         settings = get_settings()
         self._api_key = settings.gemini_api_key
-        self._vision_model = getattr(settings, 'gemini_vision_model', 'gemini-3-pro-preview')
+        self._vision_model = getattr(settings, 'gemini_vision_model', 'gemini-3-flash-preview')
         self._chat_sessions: dict[str, Any] = {}  # user_id -> chat session
         self._uploaded_files: dict[str, Any] = {}  # user_id -> uploaded file
         self._last_thumbnail_hash: dict[str, str] = {}  # user_id -> hash
@@ -283,7 +393,9 @@ class FridgeAgent(BaseAgent):
                         "role": "model",
                         "parts": [
                             "Got it! I can see your fridge contents. "
-                            "I'll keep my responses short and to the point. "
+                            "I'll keep my responses short and judgment-first. "
+                            "When you ask for meal ideas, I'll give you simple meal titles "
+                            "in a structured format - no long descriptions or option lists. "
                             "What would you like to know?"
                         ]
                     }
@@ -401,6 +513,67 @@ class FridgeAgent(BaseAgent):
             logger.error("Comprehensive fridge analysis failed: %s", e)
             return None
 
+    async def get_budget_optimization(self, user_id: str) -> Optional[str]:
+        """
+        Get budget-optimized meal recommendation based on fridge contents.
+
+        Uses decisive, single-recommendation style - no option lists.
+        Gemini reasons internally but outputs only the final judgment.
+
+        Returns None if vision chat is unavailable.
+        """
+        if not self._api_key:
+            logger.warning("No Gemini API key - budget optimization unavailable")
+            return None
+
+        thumbnail_path = self._get_thumbnail_path()
+        if not thumbnail_path.exists():
+            logger.warning("No thumbnail available for budget optimization")
+            return None
+
+        try:
+            logger.info("Starting budget optimization analysis for user %s", user_id)
+            uploaded_file = genai.upload_file(
+                path=str(thumbnail_path),
+                mime_type="image/jpeg"
+            )
+
+            # Gemini config for decisive, single-recommendation output
+            model = genai.GenerativeModel(
+                model_name=self._vision_model,
+                generation_config={
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "top_k": 64,
+                    "max_output_tokens": 2048,
+                }
+            )
+
+            # Send budget optimization prompt
+            response = model.generate_content(
+                contents=[
+                    uploaded_file,
+                    BUDGET_OPTIMIZATION_PROMPT
+                ],
+                generation_config={
+                    "temperature": 1.0,
+                    "max_output_tokens": 2048,
+                },
+            )
+
+            # Cleanup uploaded file
+            try:
+                genai.delete_file(uploaded_file.name)
+            except Exception as e:
+                logger.warning("Failed to delete temp uploaded file: %s", e)
+
+            logger.info("Budget optimization complete for user %s", user_id)
+            return response.text
+
+        except Exception as e:
+            logger.error("Budget optimization failed: %s", e)
+            return None
+
     def can_handle(self, message: str) -> bool:
         """Check if message is fridge-related"""
         message_lower = message.lower()
@@ -431,6 +604,136 @@ class FridgeAgent(BaseAgent):
             "tell me everything",
         ]
         return any(trigger in message_lower for trigger in comprehensive_triggers)
+
+    def is_budget_query(self, message: str) -> bool:
+        """
+        Check if message is asking about budget/cheap eating options.
+
+        Triggers on phrases like:
+        - "cheapest way to eat"
+        - "eat cheap this week"
+        - "budget meals"
+        - "save money on food"
+        """
+        message_lower = message.lower()
+        budget_triggers = [
+            "cheapest",
+            "cheap",
+            "budget",
+            "save money",
+            "affordable",
+            "low cost",
+            "inexpensive",
+            "economical",
+            "frugal",
+            "stretch",
+            "tight budget",
+        ]
+        return any(trigger in message_lower for trigger in budget_triggers)
+
+    def is_meal_options_query(self, message: str) -> bool:
+        """
+        Check if message is asking for meal options/ideas.
+
+        Triggers on:
+        - "yes" (follow-up to see options)
+        - "show me options"
+        - "give me meal ideas"
+        - "what can i cook"
+        - "meal ideas"
+        """
+        message_lower = message.lower().strip()
+
+        # Short affirmative responses (follow-ups)
+        affirmatives = ["yes", "yes!", "yeah", "yep", "sure", "ok", "okay", "show me", "please"]
+        if message_lower in affirmatives:
+            return True
+
+        # Meal-related queries
+        meal_triggers = [
+            "meal ideas",
+            "give me meal",
+            "show me meal",
+            "what can i cook",
+            "what can i make",
+            "recipe ideas",
+            "dinner ideas",
+            "lunch ideas",
+            "see the options",
+            "show options",
+        ]
+        return any(trigger in message_lower for trigger in meal_triggers)
+
+    async def get_meal_options(self, user_id: str) -> Optional[str]:
+        """
+        Get meal options as structured card-ready data.
+
+        Returns meal cards with title, time, servings, image_prompt.
+        """
+        if not self._api_key:
+            return None
+
+        thumbnail_path = self._get_thumbnail_path()
+        if not thumbnail_path.exists():
+            return None
+
+        try:
+            logger.info("Generating meal options for user %s", user_id)
+            uploaded_file = genai.upload_file(
+                path=str(thumbnail_path),
+                mime_type="image/jpeg"
+            )
+
+            model = genai.GenerativeModel(
+                model_name=self._vision_model,
+                generation_config={
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "top_k": 64,
+                    "max_output_tokens": 2048,
+                }
+            )
+
+            # Meal options prompt - outputs card-ready structured data
+            meal_prompt = """Based on what you see in this fridge, suggest 3-5 meals the user can make.
+
+Output EXACTLY in this format - no other text before or after:
+
+### MEALS
+- title: [Meal Name]
+  time: [X] min total
+  servings: [X] servings
+  image_prompt: Photorealistic [dish description], plated, natural lighting, clean background
+- title: [Meal Name]
+  time: [X] min total
+  servings: [X] servings
+  image_prompt: Photorealistic [dish description], plated, natural lighting, clean background
+
+RULES:
+- Title: 2-5 words, title case
+- Time: realistic cook time
+- Servings: 2-4 typically
+- image_prompt: always start with "Photorealistic", describe the finished plated dish
+- 3-5 meals maximum
+- NO paragraphs, NO "Option 1/2/3", NO cost/effort/tradeoffs
+- Just the ### MEALS section with structured entries"""
+
+            response = model.generate_content(
+                contents=[uploaded_file, meal_prompt],
+                generation_config={"temperature": 1.0, "max_output_tokens": 2048},
+            )
+
+            try:
+                genai.delete_file(uploaded_file.name)
+            except Exception as e:
+                logger.warning("Failed to delete temp uploaded file: %s", e)
+
+            logger.info("Meal options generated for user %s", user_id)
+            return response.text
+
+        except Exception as e:
+            logger.error("Meal options generation failed: %s", e)
+            return None
 
     async def process(self, context: AgentContext) -> AgentResponse:
         """
@@ -494,6 +797,48 @@ Once available, I can analyze your fridge contents and help you with:
                     )
                 else:
                     logger.warning("Comprehensive analysis failed, falling back to regular vision chat")
+
+            # Check if this is a budget/cheap eating query
+            if self.is_budget_query(context.message):
+                logger.info("Budget optimization query detected for user %s", context.user_id)
+                budget_response = await self.get_budget_optimization(context.user_id)
+
+                if budget_response:
+                    self.status = AgentStatus.COMPLETED
+                    return AgentResponse(
+                        content=budget_response,
+                        agent_type=self.agent_type,
+                        status=self.status,
+                        metadata={
+                            "model": self._vision_model,
+                            "vision_enabled": True,
+                            "budget_optimization": True,
+                            "finish_reason": "stop"
+                        }
+                    )
+                else:
+                    logger.warning("Budget optimization failed, falling back to regular vision chat")
+
+            # Check if this is a meal options/ideas query (including "Yes" follow-ups)
+            if self.is_meal_options_query(context.message):
+                logger.info("Meal options query detected for user %s", context.user_id)
+                meal_response = await self.get_meal_options(context.user_id)
+
+                if meal_response:
+                    self.status = AgentStatus.COMPLETED
+                    return AgentResponse(
+                        content=meal_response,
+                        agent_type=self.agent_type,
+                        status=self.status,
+                        metadata={
+                            "model": self._vision_model,
+                            "vision_enabled": True,
+                            "meal_options": True,
+                            "finish_reason": "stop"
+                        }
+                    )
+                else:
+                    logger.warning("Meal options generation failed, falling back to regular vision chat")
 
             # Initialize or refresh vision chat with thumbnail
             vision_ready = await self._ensure_vision_chat(context.user_id)

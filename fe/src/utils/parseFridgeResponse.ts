@@ -4,8 +4,16 @@
 
 import { FridgeResponseData, InventoryItem, MealSuggestion, RunningLowCategory } from '../components/FridgeResponseCard';
 
-// Check if a message looks like a fridge inventory response
+// Check if a message looks like a fridge inventory response or meal suggestion
 export function isFridgeResponse(content: string): boolean {
+  // Check for structured sections first (high confidence)
+  if (content.match(/###?\s*MEALS?\s*\n/i)) {
+    return true;
+  }
+  if (content.match(/###?\s*INVENTORY\s*\n/i)) {
+    return true;
+  }
+
   const lowerContent = content.toLowerCase();
   const fridgeKeywords = [
     'fridge',
@@ -23,6 +31,8 @@ export function isFridgeResponse(content: string): boolean {
     'meal',
     'recipe',
     'running low',
+    'eat well',
+    'cook',
   ];
 
   const matchCount = fridgeKeywords.filter(kw => lowerContent.includes(kw)).length;
@@ -88,39 +98,56 @@ function parseInventoryItems(content: string): InventoryItem[] {
 function parseMealSuggestions(content: string): MealSuggestion[] {
   const meals: MealSuggestion[] = [];
 
-  // Only parse meals from explicit MEALS section - progressive disclosure
+  // Only parse meals from explicit MEALS section
   const mealsSection = content.match(/###?\s*MEALS?\s*\n+([\s\S]*?)(?=\n###|\n##|$)/i);
   if (!mealsSection) {
-    // No explicit meals section = no meals to show
     return [];
   }
 
   const mealsSectionContent = mealsSection[1];
 
-  // Common meal patterns to look for within the meals section only
-  const mealPatterns = [
-    { name: 'Big Fresh Salad', keywords: ['salad', 'fresh salad', 'garden salad'] },
-    { name: 'Veggie Omelette', keywords: ['omelette', 'omelet', 'scrambled egg'] },
-    { name: 'Roasted Veggie Medley', keywords: ['roasted', 'medley', 'roast'] },
-    { name: 'Stir-Fry', keywords: ['stir fry', 'stir-fry', 'stirfry'] },
-    { name: 'Vegetable Soup', keywords: ['soup'] },
-    { name: 'Pasta Primavera', keywords: ['pasta', 'primavera'] },
-    { name: 'Grilled Cheese', keywords: ['grilled cheese'] },
-    { name: 'Veggie Wrap', keywords: ['wrap', 'burrito'] },
-    { name: 'Frittata', keywords: ['frittata'] },
-    { name: 'Buddha Bowl', keywords: ['bowl', 'buddha'] },
-  ];
+  // Try to parse structured format first:
+  // - title: Veggie Omelette
+  //   time: 15 min total
+  //   servings: 2 servings
+  //   image_prompt: ...
+  const structuredMealRegex = /-\s*title:\s*(.+?)(?:\n\s+time:\s*(.+?))?(?:\n\s+servings:\s*(.+?))?(?:\n\s+image_prompt:\s*(.+?))?(?=\n-|\n\n|$)/gi;
+  let match;
 
-  const lowerSection = mealsSectionContent.toLowerCase();
-  for (const meal of mealPatterns) {
-    if (meal.keywords.some(kw => lowerSection.includes(kw))) {
-      if (!meals.find(m => m.name === meal.name)) {
-        meals.push({ name: meal.name });
-      }
+  while ((match = structuredMealRegex.exec(mealsSectionContent)) !== null) {
+    const title = match[1]?.trim();
+    const time = match[2]?.trim();
+    const servings = match[3]?.trim();
+    const imagePrompt = match[4]?.trim();
+
+    if (title) {
+      meals.push({
+        name: title,
+        time: time,
+        servings: servings,
+        imagePrompt: imagePrompt,
+      });
     }
   }
 
-  return meals.slice(0, 3);
+  // If structured parsing found meals, return them
+  if (meals.length > 0) {
+    return meals.slice(0, 5);
+  }
+
+  // Fallback: parse simple list format (- Meal Name)
+  const simpleListRegex = /^-\s*(.+)$/gm;
+  let simpleMatch;
+
+  while ((simpleMatch = simpleListRegex.exec(mealsSectionContent)) !== null) {
+    const name = simpleMatch[1]?.trim();
+    // Skip if it looks like a field (contains colon)
+    if (name && !name.includes(':')) {
+      meals.push({ name });
+    }
+  }
+
+  return meals.slice(0, 5);
 }
 
 // Parse running low categories - ONLY from structured sections
@@ -265,9 +292,9 @@ export function getFullInventoryData(): FridgeResponseData {
 export function getMealIdeasData(): FridgeResponseData {
   return {
     meals: [
-      { name: 'Big Fresh Salad' },
-      { name: 'Veggie Omelette' },
-      { name: 'Stir-Fry' },
+      { name: 'Garden Salad', time: '10 min total', servings: '2 servings' },
+      { name: 'Veggie Omelette', time: '15 min total', servings: '2 servings' },
+      { name: 'Stir-Fry Bowl', time: '20 min total', servings: '4 servings' },
     ],
   };
 }

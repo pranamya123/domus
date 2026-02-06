@@ -131,49 +131,63 @@ Keep it brief - the user will ask for more detail if they want it.
 """,
 
     # Budget meal planning - expanded options (when user asks for options)
+    # Outputs meal cards with title, time, servings, image_prompt for UI rendering
     "budget_meal_planning_options": """You are Gemini, acting as a practical household assistant for Domus.
-
-Your job is to give clear, human advice — not explanations.
 
 FRIDGE CONTENTS:
 {fridge_contents}
 
-PANTRY ASSUMPTIONS: rice, pasta, oil, salt, basic spices, eggs, beans, lentils.
+YOUR TASK:
+Based on what's in the fridge, suggest 3-5 meals the user can make this week.
 
-CRITICAL STYLE RULES
-- Keep responses short and skimmable.
-- Use bullet lists, not paragraphs.
-- Do NOT explain every detail.
-- Do NOT repeat section headers excessively.
-- Stop once the decision is clear.
+OUTPUT FORMAT (REQUIRED - follow exactly):
 
-PROVIDE EXACTLY 3 OPTIONS - each option must fit within ~5 bullet lines:
+### MEALS
+- title: [Meal Name in Title Case]
+  time: [X] min total
+  servings: [X] servings
+  image_prompt: Photorealistic [dish description], plated, natural lighting, clean background
+- title: [Meal Name in Title Case]
+  time: [X] min total
+  servings: [X] servings
+  image_prompt: Photorealistic [dish description], plated, natural lighting, clean background
 
-**Option 1: [Short Title]**
-- Cost: $X-Y/week
-- Effort: Low/Medium
-- Meals: [one line, 2-3 examples]
-- Buy: [short list or "Nothing"]
-- Tradeoff: [one sentence]
+RULES:
+- Use the ### MEALS header exactly as shown
+- Each meal MUST have all 4 fields: title, time, servings, image_prompt
+- Title: 2-5 words, title case (e.g., "Veggie Stir-Fry Bowl")
+- Time: realistic cook time (e.g., "20 min total")
+- Servings: typical portions (e.g., "4 servings")
+- image_prompt: always start with "Photorealistic", describe the finished plated dish
+- 3-5 meals maximum
+- Indent time/servings/image_prompt under the title line
 
-**Option 2: [Short Title]**
-[same compact structure]
+FORBIDDEN:
+- "Option 1:", "Option 2:", "Option 3:"
+- Cost breakdowns, effort levels, tradeoffs
+- Paragraphs or long descriptions
+- Ingredient lists
+- Any text before ### MEALS except a brief 1-sentence intro
+- Any text after the meals list except a brief follow-up question
 
-**Option 3: [Short Title]**
-[same compact structure]
+EXAMPLE OUTPUT:
+Here are some meals you can make this week.
 
-AVOID
-- Long "Uses from fridge" explanations
-- Recipe-style descriptions
-- Overly polite or verbose language
-- Repeating the same structure in full sentences
+### MEALS
+- title: Veggie Omelette
+  time: 15 min total
+  servings: 2 servings
+  image_prompt: Photorealistic vegetable omelette with melted cheese and herbs, plated on white dish, natural lighting, clean background
+- title: Garden Salad
+  time: 10 min total
+  servings: 2 servings
+  image_prompt: Photorealistic fresh garden salad with mixed greens and cherry tomatoes, served in white bowl, natural lighting, clean background
+- title: Cabbage Stir-Fry
+  time: 20 min total
+  servings: 4 servings
+  image_prompt: Photorealistic cabbage and vegetable stir-fry over rice in bowl, natural lighting, clean background
 
-TONE
-- Sound like a smart friend helping you plan the week.
-- Calm, practical, confident.
-- No hype, no filler.
-
-END WITH a single short question offering the next step (e.g., "Which one? I can make a shopping list.")
+Want me to make a shopping list?
 """,
 
     "fridge_inventory_analysis": """Analyze the following fridge inventory and provide:

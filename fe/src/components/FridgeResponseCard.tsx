@@ -13,6 +13,9 @@ export interface InventoryItem {
 
 export interface MealSuggestion {
   name: string;
+  time?: string;
+  servings?: string;
+  imagePrompt?: string;
   image?: string;
 }
 
@@ -58,10 +61,25 @@ const ITEM_IMAGES: Record<string, string> = {
   // Meals
   salad: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=400&q=80',
   omelette: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?w=400&q=80',
+  omelet: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?w=400&q=80',
   'roasted veggie': 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&q=80',
   stir: 'https://images.unsplash.com/photo-1603133872878-684f208fb84b?w=400&q=80',
+  'stir-fry': 'https://images.unsplash.com/photo-1603133872878-684f208fb84b?w=400&q=80',
   soup: 'https://images.unsplash.com/photo-1547592166-23ac45744acd?w=400&q=80',
   pasta: 'https://images.unsplash.com/photo-1621996346565-e3dbc646d9a9?w=400&q=80',
+  quesadilla: 'https://images.unsplash.com/photo-1618040996337-56904b7850b9?w=400&q=80',
+  'fried rice': 'https://images.unsplash.com/photo-1603133872878-684f208fb84b?w=400&q=80',
+  rice: 'https://images.unsplash.com/photo-1603133872878-684f208fb84b?w=400&q=80',
+  sandwich: 'https://images.unsplash.com/photo-1528735602780-2552fd46c7af?w=400&q=80',
+  wrap: 'https://images.unsplash.com/photo-1626700051175-6818013e1d4f?w=400&q=80',
+  tacos: 'https://images.unsplash.com/photo-1565299585323-38d6b0865b47?w=400&q=80',
+  taco: 'https://images.unsplash.com/photo-1565299585323-38d6b0865b47?w=400&q=80',
+  bowl: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&q=80',
+  hash: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?w=400&q=80',
+  frittata: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?w=400&q=80',
+  scramble: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?w=400&q=80',
+  fish: 'https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?w=400&q=80',
+  grilled: 'https://images.unsplash.com/photo-1544025162-d76694265947?w=400&q=80',
 
   // Categories
   proteins: 'https://images.unsplash.com/photo-1604503468506-a8da13d82791?w=400&q=80',
@@ -108,15 +126,25 @@ function InventoryCard({ item }: { item: InventoryItem }) {
   );
 }
 
-// Meal card
+// Meal card - horizontal card with thumbnail, title, and meta
 function MealCard({ meal }: { meal: MealSuggestion }) {
   const imageUrl = meal.image || getItemImage(meal.name);
+  const metaLine = [meal.time, meal.servings].filter(Boolean).join(' • ');
+
   return (
     <div style={styles.mealCard}>
       {imageUrl && (
         <img src={imageUrl} alt={meal.name} style={styles.mealImg} />
       )}
-      <span style={styles.mealName}>{meal.name}</span>
+      <div style={styles.mealContent}>
+        <span style={styles.mealName}>{meal.name}</span>
+        {metaLine && <span style={styles.mealMeta}>{metaLine}</span>}
+      </div>
+      <div style={styles.mealChevron}>
+        <svg width="8" height="14" viewBox="0 0 8 14" fill="none">
+          <path d="M1 1L7 7L1 13" stroke="#C4C4C4" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </div>
     </div>
   );
 }
@@ -165,16 +193,10 @@ export function FridgeResponseCard({ data }: { data: FridgeResponseData }) {
 
       {/* Meals */}
       {data.meals && data.meals.length > 0 && (
-        <div style={styles.section}>
-          <div style={styles.sectionHeader}>
-            <span style={styles.sectionTitle}>You can make these meals</span>
-            <span style={styles.emoji}>🥗</span>
-          </div>
-          <div style={styles.mealsRow}>
-            {data.meals.slice(0, 3).map((meal, i) => (
-              <MealCard key={i} meal={meal} />
-            ))}
-          </div>
+        <div style={styles.mealsSection}>
+          {data.meals.slice(0, 5).map((meal, i) => (
+            <MealCard key={i} meal={meal} />
+          ))}
         </div>
       )}
 
@@ -310,29 +332,53 @@ const styles: { [key: string]: React.CSSProperties } = {
     marginLeft: '2px',
   },
 
-  // Meals
-  mealsRow: {
+  // Meals - horizontal card layout
+  mealsSection: {
     display: 'flex',
+    flexDirection: 'column',
     gap: '8px',
   },
   mealCard: {
-    flex: 1,
-    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: '12px',
+    padding: '8px 12px 8px 8px',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+    gap: '12px',
   },
   mealImg: {
-    width: '100%',
-    height: '72px',
+    width: '56px',
+    height: '56px',
     objectFit: 'cover',
-    borderRadius: '10px',
-    marginBottom: '6px',
+    borderRadius: '8px',
+    flexShrink: 0,
+  },
+  mealContent: {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
   },
   mealName: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    fontSize: '11px',
-    fontWeight: 500,
+    fontSize: '15px',
+    fontWeight: 600,
     color: '#1a1a1a',
-    textAlign: 'center' as const,
     display: 'block',
+  },
+  mealMeta: {
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontSize: '13px',
+    fontWeight: 400,
+    color: '#888888',
+  },
+  mealChevron: {
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    padding: '4px',
   },
 
   // Running Low

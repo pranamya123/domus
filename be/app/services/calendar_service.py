@@ -99,7 +99,7 @@ class CalendarService:
                 event_type="prep_required",
                 requires_prep=True,
                 prep_type="baking",
-                suggested_items=["flour", "sugar", "butter", "eggs", "vanilla extract", "baking powder", "chocolate chips"]
+                suggested_items=["flour", "sugar", "butter", "eggs", "vanilla extract", "baking powder"]
             ),
             CalendarEvent(
                 id="evt_007",

@@ -1,10 +1,28 @@
 """
 Grocery Notification Service for Domus
 
-Generates location-based grocery notifications when user enters a store
-and has items marked as "out" or "low".
+Feature: Context-Aware Suggestions (Judgment-Driven)
 
-Demo-focused: deterministic logic, no ML, no Places API.
+CORE PRINCIPLE: Deliver one non-obvious insight, not restate the trigger.
+Domus should sound like it noticed something useful, not like it fired a notification.
+
+BEHAVIOR: When user taps notification, lead with WHY this moment matters.
+The location is implicit — the value is the situational judgment.
+
+RESPONSE STRUCTURE:
+1. Judgment-driven opening (temporal reasoning, pattern recognition)
+2. Single item, confident tone
+3. Soft, optional action question
+
+HARD CONSTRAINTS:
+- Do NOT restate the location as the main point
+- Do NOT sound like a reminder system
+- Do NOT list multiple items
+- Do NOT ask more than one question
+- Do NOT introduce the assistant
+
+TONE: Thoughtful nudge, not system notification.
+SUCCESS: "That's actually a thoughtful nudge." vs "A system noticed a thing."
 """
 
 import logging
@@ -20,20 +38,20 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Demo: Items that trigger notifications
+# Demo: Items that trigger notifications (with context for smart reasoning)
 # =============================================================================
 # In production, this would come from fridge inventory analysis.
-# For demo, we use a simple lookup per user.
+# For demo, we include context to enable judgment-driven responses.
 
 DEMO_LOW_ITEMS: dict[str, list[dict]] = {
     # Default demo user - milk is out
     "default": [
-        {"item": "milk", "status": "out"},
+        {"item": "milk", "status": "out", "days_out": 3},
     ],
     # Can add more user-specific demo data
     "demo_user": [
-        {"item": "milk", "status": "out"},
-        {"item": "eggs", "status": "low"},
+        {"item": "milk", "status": "out", "days_out": 3},
+        {"item": "eggs", "status": "low", "days_out": 0},
     ],
 }
 
@@ -67,9 +85,11 @@ class GroceryNotificationService:
         Returns notification dict if sent, None otherwise.
         """
         user_id = entry.user_id
+        logger.info(f"[GROCERY] handle_geofence_entry called for user={user_id}, store={store.name}")
 
         # Get low/out items for user (demo: hardcoded)
         low_items = self._get_low_items(user_id)
+        logger.info(f"[GROCERY] low_items for {user_id}: {low_items}")
         if not low_items:
             logger.debug(f"No low items for user {user_id}")
             return None
@@ -132,24 +152,36 @@ class GroceryNotificationService:
         store: DemoStore,
         item: dict
     ) -> dict:
-        """Create and store the notification."""
+        """
+        Create and store the notification.
+
+        Response follows the In-Store Intelligence structure:
+        1. Contextual Acknowledgment (store + current presence)
+        2. Relevant Reminder (1 item, no explanations)
+        3. Gentle Action Question (low-commitment)
+        """
         item_name = item["item"]
         item_status = item["status"]
 
-        # Generate notification content
+        # Generate push notification content (short)
+        title = f"Noticed you're at {store.name}"
         if item_status == "out":
-            title = f"Noticed you're at {store.name}"
             body = f"You're out of {item_name}. Want to pick some up?"
         else:
-            title = f"Noticed you're at {store.name}"
-            body = f"You're running low on {item_name}. Good time to restock?"
+            body = f"Running low on {item_name}. Good time to grab some?"
 
-        # Chat seed content for when user taps notification
-        chat_seed = (
-            f"You're at {store.name} and {item_name} is marked as "
-            f"{'out of stock' if item_status == 'out' else 'running low'}. "
-            f"I can help you find it or add it to your shopping list."
+        # Chat seed content - Judgment-driven suggestion
+        # Leads with WHY this moment matters, not the trigger
+        days_out = item.get("days_out", 0)
+        chat_seed = self._generate_in_store_chat_seed(
+            store_name=store.name,
+            item_name=item_name,
+            item_status=item_status,
+            days_out=days_out,
         )
+
+        # Create action card for in-store assist (not Instacart order)
+        action_card = self._create_in_store_action_card(item_name)
 
         notification_id = str(uuid4())
 
@@ -167,6 +199,10 @@ class GroceryNotificationService:
         )
 
         await self._storage.state.save_notification(notification_record)
+        logger.info(
+            "Grocery notification saved to storage: id=%s, title=%s",
+            notification_id, title
+        )
 
         # Send push notification (if configured)
         # Note: For demo, push may not be configured - in-app notification still works
@@ -191,6 +227,76 @@ class GroceryNotificationService:
             "chat_seed_content": chat_seed,
             "store": store.name,
             "item": item_name,
+            "action_card": action_card,
+        }
+
+    def _generate_in_store_chat_seed(
+        self,
+        store_name: str,
+        item_name: str,
+        item_status: str,
+        days_out: int = 0,
+    ) -> str:
+        """
+        Generate a judgment-driven in-store suggestion.
+
+        FORMAT: "[Temporal reasoning] — and you're at [store], which makes this a good moment to [action]."
+
+        HARD CONSTRAINTS:
+        - Lead with temporal/inventory insight, not location
+        - Location comes second, as supporting context
+        - End with why this moment matters
+        - Single item only
+        - One soft action question
+
+        TONE: Thoughtful nudge, not system notification.
+        """
+        # Generate judgment-driven message
+        # Format: [Insight] — and you're at [store], which makes this a good moment to grab it.
+        if item_status == "out" and days_out >= 2:
+            insight = f"You've been out of **{item_name}** for a few days"
+        elif item_status == "out":
+            insight = f"**{item_name.capitalize()}** ran out recently"
+        else:
+            insight = f"You're running low on **{item_name}**"
+
+        # Combine insight + location + moment
+        message = f"{insight} — and you're at {store_name}, which makes this a good moment to grab it."
+
+        # Soft, optional action
+        action = "Want me to add it to your list?"
+
+        return f"{message}\n\n{action}"
+
+    def _create_in_store_action_card(self, item_name: str) -> dict:
+        """
+        Create action card for in-store assist.
+
+        NOT an Instacart order flow.
+        This is a lightweight in-store helper.
+
+        Actions:
+        - Add to list
+        - Mark as picked up
+        - Ignore (dismiss)
+        """
+        return {
+            "type": "in_store_assist",
+            "title": item_name.capitalize(),
+            "description": "Quick action",
+            "item": item_name,
+            "actions": [
+                {
+                    "id": "add_to_list",
+                    "label": "Add to List",
+                    "style": "secondary",
+                },
+                {
+                    "id": "picked_up",
+                    "label": "Picked Up",
+                    "style": "primary",
+                },
+            ],
         }
 
     async def _check_cooldown(self, key: str) -> bool:
