@@ -2,7 +2,7 @@
  * Chat Page - Exact mockup specs
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import ReactMarkdown from 'react-markdown';
@@ -87,6 +87,7 @@ export function ChatPage() {
   const [actionCards, setActionCards] = useState<ActionCard[]>([]);
   const [shoppingContext, setShoppingContext] = useState<ShoppingContext | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const mainContentRef = useRef<HTMLDivElement>(null);
 
   const user = useStore((state) => state.user);
   const messages = useStore((state) => state.messages);
@@ -155,9 +156,13 @@ export function ChatPage() {
   const fridgeStatus = agentStatus[AgentType.FRIDGE];
   const isAgentActivating = fridgeStatus === AgentStatus.ACTIVATING || activatingAgent !== null;
 
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Scroll to bottom when new messages arrive — useLayoutEffect runs before
+  // the browser paints, so the user never sees a frame of shifted content.
+  useLayoutEffect(() => {
+    const el = mainContentRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [messages, activatingAgent]);
 
   // Clear activating agent and thinking state when a domus response arrives
@@ -843,7 +848,7 @@ export function ChatPage() {
       )}
 
       {/* Main content */}
-      <div style={styles.mainContent}>
+      <div ref={mainContentRef} style={styles.mainContent}>
         <div style={styles.messagesContainer}>
             {messages.map((msg) => {
               const isDomus = msg.sender === 'domus';
@@ -1292,7 +1297,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'flex-end',
     alignItems: 'stretch',
     padding: '12px 16px',
     overflow: 'auto',
@@ -1305,6 +1309,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     flexDirection: 'column',
     gap: '16px',
     paddingRight: '8px',
+    marginTop: 'auto',
   },
   // User message (right-aligned)
   userMessageWrapper: {

@@ -314,6 +314,21 @@ class WebSocketManager:
                 # Mark as notified (idempotency)
                 self._grocery_notified.add(user_id)
 
+                # Set shopping context on orchestrator so follow-ups route through Gemini
+                try:
+                    from ..agents import get_orchestrator
+                    orchestrator = get_orchestrator()
+                    orchestrator.set_shopping_context(
+                        user_id=user_id,
+                        session_id=session.session_id,
+                        store_name=store.name,
+                        item_name=notification["item"],
+                        item_status="out",  # demo default
+                    )
+                    logger.info("Shopping context set for user %s at %s", user_id, store.name)
+                except Exception as e:
+                    logger.error("Failed to set shopping context: %s", e)
+
                 # Send WebSocket event for real-time UI update
                 if user_id in self._connections:
                     notification_event = DomusEvent(

@@ -11,7 +11,7 @@ from typing import Optional, Callable, Awaitable
 
 from .base import (
     BaseAgent, AgentType, AgentStatus, AgentContext, AgentResponse,
-    ConversationState, InteractionPhase
+    ConversationState, InteractionPhase, ShoppingContext
 )
 from .fridge_agent import FridgeAgent
 from .calendar_agent import CalendarAgent
@@ -104,6 +104,7 @@ class Intent(str, Enum):
     FRIDGE_ONLY = "fridge_only"                          # just fridge
     CALENDAR_ONLY = "calendar_only"                      # just calendar
     SHOPPING_ONLY = "shopping_only"                      # just shopping
+    GROCERY_SHOPPING = "grocery_shopping"                  # any turn during active shopping context
     GENERAL = "general"                                  # no specific intent
 
 
@@ -119,6 +120,7 @@ INTENT_AGENT_BUNDLES: dict[Intent, list[AgentType]] = {
     Intent.FRIDGE_ONLY: [AgentType.FRIDGE],
     Intent.CALENDAR_ONLY: [AgentType.CALENDAR],
     Intent.SHOPPING_ONLY: [AgentType.INSTACART],
+    Intent.GROCERY_SHOPPING: [],   # Handled via Gemini with shopping context
     Intent.GENERAL: [],
 }
 
@@ -328,6 +330,11 @@ class DomusOrchestrator:
         If we're in the middle of a conversation flow, use context to
         determine if this is a follow-up to a previous interaction.
         """
+        # ── Grocery shopping context takes priority when active ──
+        if conv_state.is_shopping_context_active():
+            logger.info("Active shopping context — routing to Gemini")
+            return Intent.GROCERY_SHOPPING
+
         # First, try standard intent detection
         detected_intent = self.detect_intent(message)
 
@@ -342,11 +349,11 @@ class DomusOrchestrator:
 
             # If we're in OFFERED_OPTIONS phase, short affirmatives should trigger SHOW_OPTIONS
             if conv_state.interaction_phase == InteractionPhase.OFFERED_OPTIONS:
-                message_lower = message.lower().strip()
                 affirmatives = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'y',
                               'show', 'option', 'please', 'go ahead', 'sounds good']
+                msg_lower = message.lower().strip()
 
-                if any(word in message_lower for word in affirmatives):
+                if any(word in msg_lower for word in affirmatives):
                     # Check what the active intent was
                     if conv_state.active_intent == Intent.BUDGET_MEAL_PLANNING.value:
                         logger.info("Follow-up detected: OFFERED_OPTIONS → BUDGET_SHOW_OPTIONS")
@@ -497,6 +504,18 @@ class DomusOrchestrator:
                 intent=Intent.BUDGET_SHOW_OPTIONS,
                 phase=InteractionPhase.EXPANDING_OPTIONS,
                 output_type="OPTIONS_LIST"
+            )
+            return response, AgentType.FRIDGE
+
+        # Active shopping context — all turns go through Gemini
+        elif intent == Intent.GROCERY_SHOPPING:
+            response = await self._handle_grocery_shopping_turn(context, conv_state)
+            self._update_conversation_state(
+                conv_state,
+                user_message=original_message,
+                assistant_response=response.content,
+                intent=Intent.GROCERY_SHOPPING,
+                phase=InteractionPhase.FOLLOW_UP,
             )
             return response, AgentType.FRIDGE
 
@@ -928,6 +947,149 @@ class DomusOrchestrator:
 
         return None
 
+    # ─── Grocery Shopping Turn (Gemini-powered) ─────────────────────────
+
+    async def _handle_grocery_shopping_turn(
+        self,
+        context: AgentContext,
+        conv_state: ConversationState,
+    ) -> AgentResponse:
+        """
+        Handle any message during an active shopping context via Gemini.
+
+        Code decides: is the context active, what item/store is involved.
+        Gemini decides: what to say, how to interpret the user, what to suggest.
+
+        Special branch: if the user asks about fridge contents, do a vision
+        analysis against the thumbnail and return a conversational answer.
+        Shopping context stays active — the next turn resumes normally.
+        """
+        ctx = conv_state.shopping_context
+
+        # ── Fridge-check branch (model-driven routing) ────────────────
+        if await self._is_fridge_check(context.message):
+            logger.info("Fridge check detected mid-shopping for user %s", context.user_id)
+            fridge_answer = await self._do_fridge_check(context)
+            if fridge_answer:
+                # Shopping context intentionally NOT dismissed
+                return fridge_answer
+
+        # ── Normal shopping continuation ──────────────────────────────
+        system_prompt = (
+            "You are continuing an active grocery task. "
+            "Do not reset the conversation or explain context.\n\n"
+            f"Store: {ctx.store_name}\n"
+            f"Item: {ctx.item_name} (status: {ctx.item_status})\n\n"
+            "Rules:\n"
+            "- 1-2 sentences max\n"
+            "- Use your knowledge of typical grocery store layouts when relevant\n"
+            "- Do not re-introduce yourself\n"
+            "- At most one optional follow-up question\n"
+            "- If the user is done or says thanks, say goodbye briefly"
+        )
+
+        # Build chat history: seed + any prior turns
+        history = []
+        if conv_state.last_assistant_message:
+            history.append({"role": "assistant", "content": conv_state.last_assistant_message})
+        if conv_state.last_user_message:
+            history.append({"role": "user", "content": conv_state.last_user_message})
+        if context.chat_history:
+            history.extend(context.chat_history[-4:])
+
+        response = await self.llm.generate(
+            prompt=context.message,
+            system_prompt=system_prompt,
+            chat_history=history if history else None,
+        )
+
+        # Context lifecycle: dismiss on clear endings (state concern, not language)
+        endings = ["bye", "thanks", "thank you", "that's all", "all set", "done"]
+        if any(e in context.message.lower() for e in endings):
+            ctx.dismiss()
+            logger.info("Shopping context dismissed by user")
+
+        return AgentResponse(
+            content=response.content,
+            agent_type=AgentType.FRIDGE,
+            status=AgentStatus.COMPLETED,
+            metadata={"grocery_flow": "gemini", "store": ctx.store_name, "item": ctx.item_name},
+        )
+
+    async def _is_fridge_check(self, message: str) -> bool:
+        """
+        Ask Gemini whether the user is asking about their fridge contents.
+
+        Single lightweight text call — no vision, no tools.
+        Returns True if the user wants a fridge inventory check.
+        """
+        try:
+            result = await self.llm.generate(
+                prompt=(
+                    f"The user is currently shopping at a grocery store. "
+                    f"Their message is: \"{message}\"\n\n"
+                    f"Is the user asking about what is currently in their fridge or "
+                    f"refrigerator at home (e.g. checking if they already have an item, "
+                    f"how many they have, or if something is still fresh)?\n\n"
+                    f"Answer with exactly one word: YES or NO"
+                ),
+                system_prompt="You are a routing classifier. Answer only YES or NO.",
+            )
+            answer = result.content.strip().upper()
+            return answer.startswith("YES")
+        except Exception as e:
+            logger.warning("Fridge-check classification failed: %s", e)
+            return False
+
+    async def _do_fridge_check(self, context: AgentContext) -> Optional[AgentResponse]:
+        """
+        Perform a fridge vision analysis mid-shopping and return a short,
+        conversational answer. Returns None if vision is unavailable.
+
+        Uses the FridgeAgent's existing vision chat (thumbnail + Gemini).
+        """
+        fridge_agent = self._agents.get(AgentType.FRIDGE)
+        if not fridge_agent:
+            return None
+
+        # Emit status so the UI shows "Checking your inventory..."
+        await self._emit_status(
+            AgentType.FRIDGE,
+            AgentStatus.PROCESSING,
+            "Checking your inventory..."
+        )
+
+        # Ensure the vision chat session is ready (uploads thumbnail if needed)
+        vision_ready = await fridge_agent._ensure_vision_chat(context.user_id)
+        if not vision_ready:
+            logger.warning("Vision chat unavailable for fridge check")
+            return None
+
+        # Ask the vision model with a conversational-answer constraint
+        prompt = (
+            f"{context.message}\n\n"
+            "Answer in 1-2 short, casual sentences. "
+            "Say whether the item is present, approximate quantity if visible, "
+            "and freshness if inferable. No lists, no cards."
+        )
+        answer = await fridge_agent._ask_vision_chat(context.user_id, prompt)
+        if not answer:
+            return None
+
+        await self._emit_status(
+            AgentType.FRIDGE,
+            AgentStatus.COMPLETED,
+            "Inventory checked"
+        )
+
+        logger.info("Fridge check complete for user %s", context.user_id)
+        return AgentResponse(
+            content=answer,
+            agent_type=AgentType.FRIDGE,
+            status=AgentStatus.COMPLETED,
+            metadata={"grocery_flow": "fridge_check"},
+        )
+
     async def _handle_general_chat(self, context: AgentContext) -> AgentResponse:
         """
         Handle general chat that doesn't need a specific agent.
@@ -1150,6 +1312,44 @@ Do not introduce yourself again - just respond to what they said."""
                 status=AgentStatus.ERROR,
                 metadata={"error": str(e)}
             )
+
+    def set_shopping_context(
+        self,
+        user_id: str,
+        session_id: str,
+        store_name: str,
+        item_name: str,
+        item_status: str,
+    ) -> None:
+        """
+        Set an active shopping context on the conversation state.
+
+        Called by the websocket handler when a grocery notification fires.
+        This primes the orchestrator to route follow-up messages through
+        Gemini with shopping context for the next 10 minutes.
+        """
+        conv_state = self._get_or_create_conversation_state(user_id, session_id)
+        conv_state.shopping_context = ShoppingContext(
+            store_name=store_name,
+            item_name=item_name,
+            item_status=item_status,
+        )
+        conv_state.interaction_phase = InteractionPhase.GROCERY_SHOPPING
+        conv_state.active_intent = Intent.GROCERY_SHOPPING.value
+
+        # Store the chat seed as "last assistant message" so Gemini
+        # has conversation continuity from the notification text.
+        days_qualifier = "for a few days" if item_status == "out" else ""
+        seed = (
+            f"You've been out of **{item_name}** {days_qualifier} "
+            f"— and you're at {store_name}, which makes this a good moment to grab it.\n\n"
+            f"Want me to add it to your list?"
+        )
+        conv_state.last_assistant_message = seed
+        logger.info(
+            "Shopping context set: user=%s, store=%s, item=%s (TTL=10min)",
+            user_id, store_name, item_name,
+        )
 
     def get_agent_status(self, agent_type: AgentType) -> AgentStatus:
         """Get the status of a specific agent"""

@@ -4,6 +4,7 @@ Base Agent Class for Domus
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Optional, Any
 from enum import Enum
 import logging
@@ -52,7 +53,34 @@ class InteractionPhase(str, Enum):
     OFFERED_OPTIONS = "offered_options"    # Assistant offered options to user
     EXPANDING_OPTIONS = "expanding_options"  # User asked to see options
     FOLLOW_UP = "follow_up"                # User asking follow-up questions
+    GROCERY_SHOPPING = "grocery_shopping"  # User is in a grocery store shopping context
     COMPLETED = "completed"                # Flow completed
+
+
+@dataclass
+class ShoppingContext:
+    """
+    Ephemeral shopping context that persists while a user is in a store.
+
+    Created when a grocery notification fires. Expires after 10 minutes
+    or when the user explicitly ends the conversation.
+    """
+    store_name: str
+    item_name: str
+    item_status: str  # "out" or "low"
+    started_at: datetime = field(default_factory=datetime.utcnow)
+    ttl_minutes: int = 10
+    dismissed: bool = False
+
+    def is_active(self) -> bool:
+        """Check if shopping context is still within its 10-minute window."""
+        if self.dismissed:
+            return False
+        return datetime.utcnow() - self.started_at < timedelta(minutes=self.ttl_minutes)
+
+    def dismiss(self) -> None:
+        """Explicitly end the shopping context."""
+        self.dismissed = True
 
 
 @dataclass
@@ -73,6 +101,11 @@ class ConversationState:
     last_structured_output_type: Optional[str] = None  # e.g., "OPTIONS_OFFER", "OPTIONS_LIST"
     intent_context: dict = field(default_factory=dict)  # Additional context for the intent
     turn_count: int = 0
+    shopping_context: Optional[ShoppingContext] = None
+
+    def is_shopping_context_active(self) -> bool:
+        """Check if we have an active grocery shopping context (within 10-min window)."""
+        return self.shopping_context is not None and self.shopping_context.is_active()
 
     def is_mid_conversation(self) -> bool:
         """Check if we're in the middle of a conversation flow."""
