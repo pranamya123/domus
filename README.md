@@ -1,222 +1,382 @@
-# Domus - Hierarchical Multi-Agent Smart Home System
+# Domus — Multi-Agent Smart Home Assistant
 
-A production-grade, extensible smart home system with **DomusFridge** - a camera-enabled fridge agent that tracks inventory, predicts expiration, and integrates with meal planning.
+An intelligent home assistant powered by Google Gemini, with specialized agents for fridge inventory (vision AI), calendar awareness, grocery shopping, and proactive notifications. Built with FastAPI + React, deployable as an iOS app via Capacitor.
 
-## Architecture Overview
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    React Frontend                            │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-│  │   Chat   │  │  Camera  │  │  Notif   │  │  Debug   │    │
-│  │Interface │  │   View   │  │  Inbox   │  │  Panel   │    │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    FastAPI Backend                           │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │              Level 0: Domus Orchestrator             │    │
-│  │  • Owns user communication                           │    │
-│  │  • Routes notifications                              │    │
-│  │  • Calls external services                           │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                              │                               │
-│                              ▼                               │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │              Level 1: DomusFridge Agent              │    │
-│  │  • Manages fridge state                              │    │
-│  │  • Emits intents only (no user communication)        │    │
-│  │  • Tracks inventory & expiration                     │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                              │                               │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │                    Services                          │    │
-│  │  Vision (Gemini) │ Calendar │ Instacart │ Notifs    │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                     React + Capacitor (iOS)                      │
+│  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌──────────────┐   │
+│  │   Chat   │  │  Fridge   │  │ Notif     │  │  Geofence    │   │
+│  │ Interface│  │   Card    │  │ Panel     │  │  (Location)  │   │
+│  └──────────┘  └──────────┘  └───────────┘  └──────────────┘   │
+└───────────────────────┬──────────────────────────────────────────┘
+                        │ WebSocket + REST
+                        ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                       FastAPI Backend                             │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │            Level 0: Domus Orchestrator                      │  │
+│  │  • Intent detection (context-aware)                        │  │
+│  │  • Conversation state & multi-turn flows                   │  │
+│  │  • Short reply expansion ("yes" → full context)            │  │
+│  │  • Agent routing & response synthesis                      │  │
+│  └──────────────┬─────────────────────────────────────────────┘  │
+│                 │                                                 │
+│  ┌──────────────▼─────────────────────────────────────────────┐  │
+│  │                    Level 1: Agents                          │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌───────────┐                │  │
+│  │  │ DFridge  │  │DCalendar │  │DInstacart │                │  │
+│  │  │ (Vision) │  │ (Events) │  │ (Cart)    │                │  │
+│  │  └──────────┘  └──────────┘  └───────────┘                │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │                      Services                              │  │
+│  │  Blink Camera │ Gemini LLM │ Push (FCM) │ Location/Geo   │  │
+│  │  Calendar     │ Grocery    │ Bake Sale  │ Redis Storage   │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+### Design Principles
+
+- **Business logic in code, judgment in Gemini.** The orchestrator manages state, lifecycle, and routing. All language generation, reasoning, and world knowledge come from the LLM.
+- **Contract-first types.** Shared Pydantic/TypeScript schemas in `shared/` are the single source of truth for events, state, and storage interfaces.
+- **Progressive disclosure.** Fridge responses lead with a judgment ("You're set for stir-fry tonight"), then reveal inventory and meals on demand.
+- **Ephemeral context windows.** Shopping context lives for 10 minutes, enabling natural follow-ups without permanent state bloat.
 
 ## Features
 
-### Phase 1 (Current)
-- **Fridge Inventory Management**: Upload or capture images to scan fridge contents
-- **Vision AI Analysis**: Uses Gemini Vision API (or simulated responses)
-- **Expiration Tracking**: Predicts and alerts on expiring items
-- **Conversational Interface**: Chat with Domus about your fridge
-- **Real-time Notifications**: In-app inbox, push (simulated), Alexa (simulated)
-- **IoT Camera Support**: Simulated endpoint for fridge camera integration
+### Fridge Agent (DFridge)
+- **Gemini Vision analysis** of Blink camera thumbnails — identifies items, quantities, freshness
+- Persistent vision chat sessions per user (upload once, ask many questions)
+- Judgment-first responses: meal readiness assessment before inventory lists
+- Structured output: `### MEALS` with title, time, servings, image_prompt for card rendering
+- Budget meal planning with cost estimates
+- Mid-shopping fridge checks (model-driven routing, not keywords)
 
-### Agent Boundaries (Enforced)
-- **Level 0 (Orchestrator)**: Sole authority for user communication and external APIs
-- **Level 1 (DomusFridge)**: Domain expert that emits structured intents only
+### Calendar Agent (DCalendar)
+- Time-aware meal recommendations based on today's schedule
+- Workout detection for post-exercise nutrition suggestions
+- Prep-required event detection (bake sales, dinner parties, potlucks)
+
+### Instacart Agent (DInstacart)
+- Shopping cart management with mock product catalog
+- Cross-references fridge contents to suggest what's missing
+- Activity-based recommendations (workout supplements, meal prep items)
+
+### Proactive Notifications
+
+**Grocery Store Notifications:**
+- Geofence detection when user enters a grocery store
+- Judgment-driven nudge: "You've been out of milk for a few days — and you're at Whole Foods, which makes this a good moment to grab it."
+- 10-minute shopping context for natural follow-ups via Gemini
+- 24-hour cooldown per store per item
+
+**Bake Sale / Event Prep Notifications:**
+- Calendar scan for prep-required events
+- Fridge inventory vs. required items comparison
+- Push notification with deep link to chat
+
+### Multi-Turn Conversations
+- Context-aware intent detection across conversation turns
+- Short reply expansion: "yes" becomes "Yes, please show me the budget meal options"
+- Interaction phases: INITIAL → OFFERED_OPTIONS → EXPANDING_OPTIONS → FOLLOW_UP
+- Shopping context: all messages within 10-min window routed through Gemini with store/item context
 
 ## Tech Stack
 
 ### Backend
-- **FastAPI** - Async Python web framework
-- **SQLAlchemy** - Async ORM with SQLite (PostgreSQL-ready)
-- **Pydantic** - Data validation
-- **Google Gemini** - Vision AI for image analysis
-- **WebSockets** - Real-time communication
+| Technology | Purpose |
+|---|---|
+| **FastAPI** | Async web framework (REST + WebSocket) |
+| **Google Gemini** (`gemini-3-flash-preview`) | Text generation + multimodal vision |
+| **Redis** (with hiredis) | Session storage, event streams, pub/sub, cooldowns |
+| **Pydantic v2** | Data validation and serialization |
+| **blinkpy** | Blink camera authentication and media fetching |
+| **python-jose + passlib** | JWT authentication with bcrypt |
+| **LangGraph** | Agent orchestration primitives |
 
 ### Frontend
-- **React 18** - UI framework
-- **TypeScript** - Type safety
-- **Vite** - Build tool
-- **TailwindCSS** - Styling (dark mode)
-- **Zustand** - State management
+| Technology | Purpose |
+|---|---|
+| **React 18** | UI framework |
+| **TypeScript** | Type safety |
+| **Vite** | Build tool and dev server |
+| **Zustand** | Lightweight state management |
+| **Capacitor 5** | iOS native bridge (camera, push, geolocation) |
+| **react-markdown** | Rendering AI responses |
+
+## Project Structure
+
+```
+domus/
+├── be/                              # Backend
+│   ├── app/
+│   │   ├── main.py                  # FastAPI app entry point
+│   │   ├── agents/
+│   │   │   ├── base.py              # BaseAgent, AgentType, ConversationState, ShoppingContext
+│   │   │   ├── orchestrator.py      # DomusOrchestrator — intent detection, routing, synthesis
+│   │   │   ├── fridge_agent.py      # DFridge — Gemini vision chat, meal planning
+│   │   │   ├── calendar_agent.py    # DCalendar — events, workouts, time-aware meals
+│   │   │   └── instacart_agent.py   # DInstacart — cart management, product suggestions
+│   │   ├── api/
+│   │   │   ├── routes.py            # REST endpoints (auth, blink, fridge, notifications, location)
+│   │   │   └── websocket.py         # WebSocket handler, notification triggers, shopping context
+│   │   ├── core/
+│   │   │   ├── config.py            # Settings (env vars, CORS, model config)
+│   │   │   └── auth.py              # JWT tokens, mock Gmail OAuth
+│   │   ├── llm/
+│   │   │   ├── gemini_service.py    # Gemini API wrapper (generate, stream, vision)
+│   │   │   └── prompts.py           # System prompts per agent
+│   │   ├── services/
+│   │   │   ├── blink_service.py     # Blink camera auth, 2FA, media sync
+│   │   │   ├── blink_motion_watcher.py  # Background polling for thumbnail changes
+│   │   │   ├── calendar_service.py  # Mock calendar events
+│   │   │   ├── fridge_inventory_service.py  # Camera capture + inventory extraction
+│   │   │   ├── grocery_notification_service.py  # Geofence-triggered grocery nudges
+│   │   │   ├── bake_sale_notification_service.py  # Event prep notifications
+│   │   │   ├── push_notification_service.py  # FCM HTTP v1 push delivery
+│   │   │   ├── location_service.py  # Geofence validation, demo store registry
+│   │   │   └── instacart_service.py # Mock shopping cart + product catalog
+│   │   └── storage/
+│   │       ├── memory_store.py      # In-memory storage (dev/Phase 1)
+│   │       └── redis_store.py       # Redis storage with Streams + Pub/Sub
+│   ├── requirements.txt
+│   └── .env
+│
+├── fe/                              # Frontend
+│   ├── src/
+│   │   ├── App.tsx                  # Root component, screen routing, Capacitor init
+│   │   ├── main.tsx                 # React entry point
+│   │   ├── config.ts               # Demo mode flag, API base URL
+│   │   ├── pages/
+│   │   │   ├── ChatPage.tsx         # Main chat UI (messages, action cards, Blink modal, notifications)
+│   │   │   ├── SplashScreen.tsx     # 3-second splash with logo
+│   │   │   ├── LoginPage.tsx        # Email login form
+│   │   │   └── LandingPage.tsx      # Pre-login welcome
+│   │   ├── components/
+│   │   │   └── FridgeResponseCard.tsx  # Premium card UI for fridge analysis results
+│   │   ├── hooks/
+│   │   │   ├── useWebSocket.ts      # Real-time event streaming + reconnection
+│   │   │   ├── useApi.ts            # REST API wrapper (auth, blink, media, notifications)
+│   │   │   ├── useCapacitor.ts      # iOS native: push, local notifications, deep links
+│   │   │   └── useGeofence.ts       # Location-based grocery store detection
+│   │   ├── store/
+│   │   │   └── useStore.ts          # Zustand global state (auth, messages, agents, notifications)
+│   │   ├── types/
+│   │   │   └── index.ts             # TypeScript types (events, agents, messages)
+│   │   ├── utils/
+│   │   │   └── parseFridgeResponse.ts  # Parser for structured fridge AI responses
+│   │   └── assets/
+│   │       └── styles.css           # Global styles, animations
+│   ├── ios/                         # Xcode project (Capacitor-generated)
+│   ├── capacitor.config.ts          # iOS app config (com.domus.app)
+│   ├── vite.config.ts               # Dev server + API proxy
+│   └── package.json
+│
+├── shared/                          # Contract-first shared types
+│   ├── schemas/
+│   │   ├── events.py                # DomusEvent, EventType, payloads, factory functions
+│   │   ├── state.py                 # UserSession, InventorySnapshot, NotificationRecord, etc.
+│   │   └── storage.py               # StateStore + EventStore abstract interfaces
+│   └── types/
+│       └── events.ts                # TypeScript mirror of events.py
+│
+├── mcp/                             # MCP servers (planned, Phase 2+)
+├── pyproject.toml                   # Python package config (domus v1.0.0, Python 3.11+)
+├── start-backend.sh                 # Backend startup script
+├── start-frontend.sh                # Frontend startup script
+└── .gitignore
+```
 
 ## Quick Start
 
 ### Prerequisites
 - Python 3.11+
 - Node.js 18+
-- (Optional) Gemini API key for real vision analysis
+- Redis (optional in Phase 1 — falls back to in-memory storage)
+- Google Gemini API key
 
-### Backend Setup
+### Backend
 
 ```bash
-cd backend
+cd be
 
 # Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python3 -m venv venv
+source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your settings (Gemini API key optional)
+# Set DOMUS_GEMINI_API_KEY in .env
 
-# Run the server
-python -m uvicorn app.main:app --reload --port 8000
+# Run
+uvicorn app.main:app --reload --port 8000
 ```
 
-### Frontend Setup
+Or from the project root:
+```bash
+./start-backend.sh
+```
+
+### Frontend
 
 ```bash
-cd frontend
-
-# Install dependencies
+cd fe
 npm install
-
-# Run development server
 npm run dev
 ```
 
-Visit `http://localhost:5173` to access the application.
+Or from the project root:
+```bash
+./start-frontend.sh
+```
+
+Visit `http://localhost:5173`.
+
+### iOS Build
+
+```bash
+cd fe
+npm run build
+npx cap sync ios
+npx cap open ios    # Opens Xcode
+```
+
+## Environment Variables
+
+### Backend (`be/.env`)
+
+| Variable | Description | Default |
+|---|---|---|
+| `DOMUS_GEMINI_API_KEY` | Google Gemini API key | Required |
+| `DOMUS_DEMO_MODE` | Bypass authentication | `true` |
+| `DOMUS_REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
+| `DOMUS_REDIS_PASSWORD` | Redis password | (none) |
+| `DOMUS_BLINK_REGION` | Blink account region | `us` |
+| `FCM_SERVER_KEY` | Firebase service account key | (optional) |
+| `FCM_PROJECT_ID` | Firebase project ID | `domus-app` |
+| `DEMO_DEVICE_TOKEN` | iOS device token for push testing | (optional) |
+
+### Frontend (`fe/.env`)
+
+| Variable | Description | Default |
+|---|---|---|
+| `VITE_API_URL` | Backend API URL | `http://localhost:8000` |
+| `VITE_WS_URL` | WebSocket URL (derived from API URL if not set) | (auto) |
 
 ## API Endpoints
 
 ### Authentication
-- `POST /api/auth/login` - Development login
-- `GET /api/auth/me` - Get current user
-- `POST /api/auth/logout` - Logout
+- `POST /api/auth/login` — Email-based mock OAuth login. Returns JWT token + user info.
 
-### Chat
-- `POST /api/chat/message` - Send message to Domus
-- `GET /api/chat/history` - Get conversation history
-- `WS /api/chat/ws/{token}` - WebSocket for real-time chat
+### Blink Camera Integration
+- `POST /api/blink/login` — Blink credentials (email, password)
+- `POST /api/blink/verify-2fa` — 6-digit 2FA verification
+- `GET /api/blink/status` — Connection status
+- `POST /api/blink/logout` — Disconnect
 
-### Upload
-- `POST /api/upload/image` - Upload fridge image for analysis
-- `POST /api/upload/validate` - Validate image without processing
-
-### IoT
-- `POST /api/ingest/iot` - Ingest image from IoT camera
-- `POST /api/ingest/device/register` - Register IoT device
-- `GET /api/ingest/device/{household_id}/status` - Get device status
+### Fridge
+- `POST /api/fridge/refresh` — Capture camera frame + extract inventory
+- `GET /api/fridge/inventory` — Get latest inventory snapshot
 
 ### Notifications
-- `GET /api/notifications/` - Get user notifications
-- `POST /api/notifications/read/{id}` - Mark notification read
-- `POST /api/notifications/read-all` - Mark all read
-- `WS /api/notifications/ws/{token}` - WebSocket for real-time notifications
+- `GET /api/notifications` — Notification history
+- `POST /api/notifications/{id}/read` — Mark as read
+- `GET /api/notifications/unread/count` — Unread badge count
 
-## Configuration
+### Location / Geofence
+- `GET /api/location/stores` — Demo store geofences
+- `POST /api/location/entered` — Geofence entry event (triggers grocery notification)
 
-### Environment Variables
+### Media
+- `GET /api/media/{filename}` — Retrieve thumbnails and video clips
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GEMINI_API_KEY` | Google Gemini API key | (optional) |
-| `DATABASE_URL` | Database connection string | SQLite |
-| `SECRET_KEY` | JWT signing key | (required in prod) |
-| `IOT_DEVICE_TOKEN` | Token for IoT device auth | mock-iot-device-token |
-| `IOT_IMAGE_DEBOUNCE_SECONDS` | Min seconds between IoT images | 900 (15 min) |
+### Health
+- `GET /` — Root health check
+- `GET /api/health` — Detailed health with Redis status
 
-## Development
+### WebSocket
+- `GET /ws?token=<jwt>` — Real-time event stream (chat messages, agent status, notifications, heartbeat)
 
-### Project Structure
+## Key Data Flows
 
+### Chat Message
 ```
-domus/
-├── backend/
-│   ├── app/
-│   │   ├── agents/          # L0 Orchestrator, L1 DomusFridge
-│   │   ├── api/routes/      # FastAPI endpoints
-│   │   ├── core/            # EventBus, Security, Database
-│   │   ├── models/          # SQLAlchemy models
-│   │   ├── schemas/         # Pydantic schemas
-│   │   └── services/        # Vision, Calendar, Instacart, Notifications
-│   ├── requirements.txt
-│   └── .env
-├── frontend/
-│   ├── src/
-│   │   ├── components/      # React components
-│   │   ├── pages/           # Page components
-│   │   ├── providers/       # Context providers
-│   │   ├── services/        # API client
-│   │   ├── store/           # Zustand store
-│   │   └── types/           # TypeScript types
-│   └── package.json
-└── README.md
+User types message
+  → WebSocket sends to backend
+  → Orchestrator: get/create ConversationState
+  → Short reply expansion (if mid-conversation)
+  → Intent detection (context + pattern-based)
+  → Route to agent(s)
+  → Agent calls Gemini with domain-specific prompt
+  → Status callbacks → WebSocket → frontend shows "Activating DFridge..."
+  → Response → WebSocket → frontend renders (Markdown or FridgeResponseCard)
 ```
 
-### Testing the System
-
-1. **Login**: Use any email/name combination
-2. **Chat**: Ask "What's in my fridge?"
-3. **Scan**: Upload a fridge image (any image works in dev mode)
-4. **Notifications**: Check the Alerts tab for expiry warnings
-
-### Simulated vs Real Vision
-
-Without a Gemini API key, the system uses simulated responses with realistic mock data. To enable real vision analysis:
-
-1. Get an API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Add to `.env`: `GEMINI_API_KEY=your-key-here`
-3. Restart the backend
-
-## Success Criteria (per spec)
-
-### Traceability Test
+### Grocery Notification (Proactive)
 ```
-Upload Image → Validation Passed → Inventory Updated →
-L1 emits EXPIRY_WARNING → L0 routes to NotificationService
+User enters store geofence (or simulated on WebSocket connect)
+  → Location service validates store
+  → Inventory checked for low/out items
+  → GroceryNotificationService creates judgment-driven message
+  → Push notification (FCM) + WebSocket event
+  → User taps notification → chat seed content inserted
+  → Action card: "Add to List" / "Picked Up"
+  → Shopping context set (10-min TTL)
+  → Follow-up messages routed through Gemini with store + item context
+  → Mid-shopping fridge check: model classifies intent → Gemini vision on thumbnail
 ```
 
-### Debounce Test
+### Budget Meal Planning (Multi-Turn)
 ```
-T=0    IoT upload accepted
-T=5m   IoT upload ignored (within debounce window)
-T=16m  IoT upload accepted
+User: "cheapest way to eat this week?"
+  → Intent: BUDGET_MEAL_PLANNING
+  → FridgeAgent vision analysis
+  → Orchestrator returns short intro + "Show options?"
+  → Phase: OFFERED_OPTIONS
+
+User: "yes"
+  → Expanded to: "Yes, please show me the budget meal options."
+  → Intent: BUDGET_SHOW_OPTIONS
+  → 3-5 structured meal options returned
+  → Phase: EXPANDING_OPTIONS
 ```
 
-### Notification Test
-- Expiry event appears in `logs/notifications.log`
-- Expiry event appears in React Notification Inbox
+## Demo Stores (Geofence)
 
-## Out of Scope (Phase 1)
-- Multi-fridge households
-- Pantry/Laundry agents
-- Real Alexa skill integration
-- Real payment processing
-- Nutritional optimization
+| Store | Location | Coordinates |
+|---|---|---|
+| Whole Foods SoMa | San Francisco | 37.7785, -122.3950 |
+| Trader Joe's Castro | San Francisco | 37.7609, -122.4350 |
+| Safeway Marina | San Francisco | 37.8005, -122.4369 |
+| Demo Grocery | Apple Park area | 37.3318, -122.0312 |
+
+## Development Notes
+
+### Demo Mode
+Set `DOMUS_DEMO_MODE=true` (backend) and `DEMO_MODE=true` in `fe/src/config.ts` to bypass authentication. The app auto-authenticates with a demo token.
+
+### Storage
+Phase 1 uses in-memory storage (`MemoryDomusStorage`). Redis (`RedisDomusStorage`) is available and swappable via the abstract `DomusStorage` interface.
+
+### Mock Services
+Calendar, Instacart, and Location services use hardcoded demo data. Production implementations would swap in real API integrations behind the same interfaces.
+
+### Adding a New Agent
+1. Create `be/app/agents/my_agent.py` extending `BaseAgent`
+2. Add `AgentType.MY_AGENT` to `base.py`
+3. Register in `orchestrator.py`'s `_agents` dict
+4. Add intent detection patterns
+5. Add system prompt in `prompts.py`
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License
